@@ -100,17 +100,21 @@ def text_embedding(text):
         else: raise RuntimeError("unsupported CLIP text input")
     return _normalize(np,_pick_embedding(session.run(None,inputs)))[0]
 
-def image_embedding(g,row):
+def path_embedding(g,path):
+    """Create a normalized CLIP embedding from one local image path."""
     np,session,text,tok=_runtime()
-    with g["_materialize_row"](row) as path:
-        with g["Image"].open(path) as src:
-            img=g["ImageOps"].exif_transpose(src).convert("RGB")
-            w,h=img.size; scale=224/min(w,h); nw=max(224,round(w*scale)); nh=max(224,round(h*scale)); img=img.resize((nw,nh),g["Image"].Resampling.BICUBIC)
-            left=(nw-224)//2; top=(nh-224)//2; img=img.crop((left,top,left+224,top+224))
-            arr=np.asarray(img,dtype=np.float32)/255.0
+    with g["Image"].open(path) as src:
+        img=g["ImageOps"].exif_transpose(src).convert("RGB")
+        w,h=img.size; scale=224/min(w,h); nw=max(224,round(w*scale)); nh=max(224,round(h*scale)); img=img.resize((nw,nh),g["Image"].Resampling.BICUBIC)
+        left=(nw-224)//2; top=(nh-224)//2; img=img.crop((left,top,left+224,top+224))
+        arr=np.asarray(img,dtype=np.float32)/255.0
     mean=np.asarray([0.48145466,0.4578275,0.40821073],dtype=np.float32); std=np.asarray([0.26862954,0.26130258,0.27577711],dtype=np.float32)
     arr=((arr-mean)/std).transpose(2,0,1)[None,:,:,:]
     inputs={session.get_inputs()[0].name:arr}; return _normalize(np,_pick_embedding(session.run(None,inputs)))[0]
+
+def image_embedding(g,row):
+    with g["_materialize_row"](row) as path:
+        return path_embedding(g,path)
 
 def install(g: dict[str,Any]) -> None:
     schema=g["_schema"];tools=g["TOOLS"];descriptions=g["DESCRIPTIONS"];readonly=g["READ_ONLY"];db=g["_db"]
