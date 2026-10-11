@@ -73,3 +73,7 @@ See `docs/ARCHITECTURE.md` and `docs/SAFETY.md`.
 ### Realtime pipeline
 
 From v0.2.0, a unified scheduler coordinates scan → OCR → visual → duplicate → semantic processing. Local file events trigger near-real-time reconciliation when `inotifywait` is available, while periodic reconciliation guarantees eventual consistency. The dashboard can switch between Balanced, Fast and Unlimited processing profiles without restarting the addon.
+
+### Hybrid Search 2.0
+
+`gallery_hybrid_search` fuses metadata, OCR and local CLIP signals and explains why each image matched. Russian and Latvian visual queries receive local English CLIP variants; no translation API is used. `gallery_search_contact_sheet` returns a compact visual candidate sheet for ChatGPT reranking.

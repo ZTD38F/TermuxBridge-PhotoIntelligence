@@ -41,3 +41,9 @@ The local dashboard exposes source state, per-stage coverage, pipeline health, s
 ## Schema migrations
 
 SQLite changes are versioned through `PRAGMA user_version`. Before a schema version upgrade, a SQLite backup API snapshot is written under the addon's private `state/backups` directory; only the three newest schema-transition backups are retained.
+
+## Hybrid Search 2.0 (v0.3.0)
+
+Search uses weighted reciprocal-rank fusion across filename/path metadata, FTS5 OCR and local CLIP embeddings. Results include per-signal explanations instead of a single opaque score. RU/LV visual terms are expanded locally into an English CLIP query variant while the original text remains the canonical OCR/metadata query. Low-value sticker/cache/thumbnail assets are penalized for semantic-only matches but remain discoverable by direct metadata/OCR queries.
+
+`gallery_search_contact_sheet` runs the hybrid ranker and renders top candidates as one labeled image, allowing ChatGPT to visually rerank a short candidate set without opening the entire library.
