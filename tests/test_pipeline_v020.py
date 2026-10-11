@@ -21,8 +21,8 @@ class PipelineFoundationTests(unittest.TestCase):
     def test_migration_sets_version_and_backup(self):
         db=self.state/'gallery.sqlite3'
         with sqlite3.connect(db) as c:c.execute('create table images(id integer primary key,path text)');c.commit()
-        r=self.migrations.migrate(db);self.assertTrue(r['ok']);self.assertEqual(r['to'],2);self.assertTrue(Path(r['backup']).is_file())
-        with sqlite3.connect(db) as c:self.assertEqual(c.execute('pragma user_version').fetchone()[0],2);self.assertIsNotNone(c.execute("select 1 from sqlite_master where type='table' and name='gallery_cleanup_actions'").fetchone())
+        r=self.migrations.migrate(db);self.assertTrue(r['ok']);self.assertEqual(r['to'],3);self.assertTrue(Path(r['backup']).is_file())
+        with sqlite3.connect(db) as c:self.assertEqual(c.execute('pragma user_version').fetchone()[0],3);self.assertIsNotNone(c.execute("select 1 from sqlite_master where type='table' and name='gallery_cleanup_actions'").fetchone());self.assertIsNotNone(c.execute("select 1 from sqlite_master where type='table' and name='gallery_metadata_index'").fetchone());self.assertIsNotNone(c.execute("select 1 from sqlite_master where type='table' and name='gallery_smart_albums'").fetchone())
         r2=self.migrations.migrate(db);self.assertIsNone(r2['backup'])
     def test_watcher_dirty_marker_contains_no_content(self):
         p=self.shared/'DCIM'/'Camera';p.mkdir(parents=True);f=p/'x.jpg';f.write_bytes(b'secret-photo-bytes')
