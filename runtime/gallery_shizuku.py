@@ -108,7 +108,7 @@ def available() -> bool:
 def source_available(value: str, *, ttl: float = 30.0) -> bool:
     return not is_virtual(value) or available_cached(ttl=ttl)
 
-def enumerate_images(exts: Iterable[str], *, timeout: float = 120) -> list[tuple[str,int,float]]:
+def enumerate_files(exts: Iterable[str], *, timeout: float = 120) -> list[tuple[str,int,float]]:
     exts = sorted({x.lower().lstrip(".") for x in exts if x})
     if not exts:
         return []
@@ -131,6 +131,10 @@ def enumerate_images(exts: Iterable[str], *, timeout: float = 120) -> list[tuple
         if size > 0 and path.startswith(ANDROID_DATA + "/"):
             out.append((path,size,mtime))
     return out
+
+def enumerate_images(exts: Iterable[str], *, timeout: float = 120) -> list[tuple[str,int,float]]:
+    """Backward-compatible image manifest helper."""
+    return enumerate_files(exts, timeout=timeout)
 
 def stat_virtual(value: str, *, timeout: float = 15) -> tuple[int,float]:
     path = to_absolute(value)
