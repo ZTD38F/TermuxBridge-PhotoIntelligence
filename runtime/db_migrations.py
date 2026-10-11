@@ -5,7 +5,7 @@ from __future__ import annotations
 import os,sqlite3,time
 from pathlib import Path
 from photo_config import STATE_DIR
-TARGET_VERSION=2
+TARGET_VERSION=3
 
 def _backup(path:Path,current:int,target:int)->Path:
     outdir=STATE_DIR/"backups";outdir.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -47,6 +47,22 @@ def migrate(path:Path)->dict:
             c.execute("CREATE INDEX IF NOT EXISTS cleanup_actions_plan_idx ON gallery_cleanup_actions(plan_id,state)")
             c.execute("INSERT OR REPLACE INTO photo_schema_migrations(version,applied_at,note) VALUES(2,?,?)",(time.time(),"reversible cleanup quarantine"))
             c.execute("PRAGMA user_version=2")
+        if current<3:
+            c.execute("""CREATE TABLE IF NOT EXISTS gallery_metadata_index(
+              image_id INTEGER PRIMARY KEY,size INTEGER NOT NULL,mtime REAL NOT NULL,processed_at REAL NOT NULL,
+              width INTEGER,height INTEGER,taken_text TEXT,taken_epoch REAL,camera_make TEXT,camera_model TEXT,
+              exif_orientation INTEGER,gps_lat REAL,gps_lon REAL,gps_alt REAL,error TEXT,
+              FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE)""")
+            c.execute("CREATE INDEX IF NOT EXISTS gallery_metadata_taken_idx ON gallery_metadata_index(taken_epoch)")
+            c.execute("CREATE INDEX IF NOT EXISTS gallery_metadata_camera_idx ON gallery_metadata_index(camera_make,camera_model)")
+            c.execute("""CREATE TABLE IF NOT EXISTS gallery_smart_albums(
+              album_id TEXT PRIMARY KEY,name TEXT NOT NULL COLLATE NOCASE UNIQUE,created_at REAL NOT NULL,updated_at REAL NOT NULL,criteria TEXT NOT NULL)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS gallery_tags(
+              image_id INTEGER NOT NULL,tag TEXT NOT NULL COLLATE NOCASE,created_at REAL NOT NULL,
+              PRIMARY KEY(image_id,tag),FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE)""")
+            c.execute("CREATE INDEX IF NOT EXISTS gallery_tags_tag_idx ON gallery_tags(tag)")
+            c.execute("INSERT OR REPLACE INTO photo_schema_migrations(version,applied_at,note) VALUES(3,?,?)",(time.time(),"metadata intelligence and smart albums"))
+            c.execute("PRAGMA user_version=3")
         c.commit()
         integrity=c.execute("PRAGMA integrity_check").fetchone()[0]
     return {"ok":integrity=="ok","from":current,"to":TARGET_VERSION,"backup":str(backup) if backup else None,"integrity":integrity}

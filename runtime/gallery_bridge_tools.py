@@ -573,6 +573,10 @@ from gallery_duplicates import install as _install_photo_duplicates
 _install_photo_duplicates(globals())
 from gallery_sources import install as _install_photo_sources
 _install_photo_sources(globals())
+from gallery_metadata import install as _install_photo_metadata
+_install_photo_metadata(globals())
+from gallery_smart_albums import install as _install_photo_smart_albums
+_install_photo_smart_albums(globals())
 from gallery_pipeline import install as _install_photo_pipeline
 _install_photo_pipeline(globals())
 
