@@ -38,6 +38,7 @@ def inotify_loop(watched):
     cmd=[shutil.which("inotifywait"),"-m","-r","-q","-e","close_write,create,moved_to,delete,moved_from","--format","%e|%w%f",*[str(x) for x in watched]]
     proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,start_new_session=True)
     last_event=None
+    status("inotify",watched,last_event)
     try:
         while not STOP:
             if proc.poll() is not None:raise RuntimeError("inotifywait exited")
@@ -58,6 +59,7 @@ def inotify_loop(watched):
 
 def poll_loop(watched):
     mtimes={}
+    status("poll",watched)
     while not STOP:
         current={}
         for p in watched:

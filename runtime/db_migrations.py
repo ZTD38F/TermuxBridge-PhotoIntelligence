@@ -5,7 +5,7 @@ from __future__ import annotations
 import os,sqlite3,time
 from pathlib import Path
 from photo_config import STATE_DIR
-TARGET_VERSION=1
+TARGET_VERSION=2
 
 def _backup(path:Path,current:int,target:int)->Path:
     outdir=STATE_DIR/"backups";outdir.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -27,9 +27,9 @@ def migrate(path:Path)->dict:
     if existed and current<TARGET_VERSION:backup=_backup(path,current,TARGET_VERSION)
     with sqlite3.connect(path) as c:
         c.execute("PRAGMA foreign_keys=ON")
+        c.execute("""CREATE TABLE IF NOT EXISTS photo_schema_migrations(
+            version INTEGER PRIMARY KEY, applied_at REAL NOT NULL, note TEXT NOT NULL)""")
         if current<1:
-            c.execute("""CREATE TABLE IF NOT EXISTS photo_schema_migrations(
-                version INTEGER PRIMARY KEY, applied_at REAL NOT NULL, note TEXT NOT NULL)""")
             c.execute("""CREATE TABLE IF NOT EXISTS pipeline_events(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL,
                 stage TEXT NOT NULL, state TEXT NOT NULL, duration_ms INTEGER,
@@ -37,6 +37,16 @@ def migrate(path:Path)->dict:
             c.execute("CREATE INDEX IF NOT EXISTS pipeline_events_created_idx ON pipeline_events(created_at DESC)")
             c.execute("INSERT OR REPLACE INTO photo_schema_migrations(version,applied_at,note) VALUES(1,?,?)",(time.time(),"pipeline foundation"))
             c.execute("PRAGMA user_version=1")
+        if current<2:
+            c.execute("CREATE TABLE IF NOT EXISTS gallery_cleanup_plans(plan_id TEXT PRIMARY KEY,created_at REAL NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL)")
+            c.execute("""CREATE TABLE IF NOT EXISTS gallery_cleanup_actions(
+              action_id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,image_id INTEGER NOT NULL,
+              original_path TEXT NOT NULL,quarantine_path TEXT NOT NULL,size INTEGER NOT NULL,mtime REAL NOT NULL,
+              state TEXT NOT NULL,quarantined_at REAL NOT NULL,restored_at REAL,purged_at REAL,
+              FOREIGN KEY(plan_id) REFERENCES gallery_cleanup_plans(plan_id) ON DELETE CASCADE)""")
+            c.execute("CREATE INDEX IF NOT EXISTS cleanup_actions_plan_idx ON gallery_cleanup_actions(plan_id,state)")
+            c.execute("INSERT OR REPLACE INTO photo_schema_migrations(version,applied_at,note) VALUES(2,?,?)",(time.time(),"reversible cleanup quarantine"))
+            c.execute("PRAGMA user_version=2")
         c.commit()
         integrity=c.execute("PRAGMA integrity_check").fetchone()[0]
     return {"ok":integrity=="ok","from":current,"to":TARGET_VERSION,"backup":str(backup) if backup else None,"integrity":integrity}

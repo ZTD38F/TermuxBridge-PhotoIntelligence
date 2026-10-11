@@ -104,6 +104,8 @@ def install(g: dict[str, Any]) -> None:
                     rel_child = str(child.relative_to(root)).replace("\\", "/").lower()
                     if rel_child == "android/data" or rel_child.startswith("android/data/"):
                         continue
+                    if rel_child == ".photo-intelligence-quarantine" or rel_child.startswith(".photo-intelligence-quarantine/"):
+                        continue
                     kept.append(d)
                 dirs[:] = kept
                 for name in filenames:

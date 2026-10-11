@@ -31,7 +31,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version="PhotoIntelligence/0.2"
     def log_message(self,format,*args):pass
     def _error(self,exc):
-        if isinstance(exc,(ValueError,KeyError,json.JSONDecodeError)):return _json(self,400,{"ok":False,"error":str(exc)[:200]})
+        if isinstance(exc,(ValueError,KeyError,json.JSONDecodeError,PermissionError)):return _json(self,400,{"ok":False,"error":str(exc)[:200]})
+        if isinstance(exc,(FileExistsError,FileNotFoundError)):return _json(self,409,{"ok":False,"error":str(exc)[:200]})
         return _json(self,500,{"ok":False,"error":type(exc).__name__})
     def do_GET(self):
         parsed=urlparse(self.path);q=parse_qs(parsed.query);path=parsed.path
@@ -51,6 +52,8 @@ class Handler(BaseHTTPRequestHandler):
             if path=="/api/albums":return _json(self,200,g.gallery_albums({"limit":500}))
             if path=="/api/categories":return _json(self,200,g.TOOLS["gallery_categories"][1]({}))
             if path=="/api/cleanup":return _json(self,200,g.TOOLS["gallery_cleanup_candidates"][1]({"limit":200}))
+            if path=="/api/cleanup/plan":return _json(self,200,g.TOOLS["gallery_cleanup_plan_get"][1]({"plan_id":q.get("plan_id",[""])[0]}))
+            if path=="/api/quarantine":return _json(self,200,g.TOOLS["gallery_quarantine_status"][1]({}))
             if path=="/api/duplicates":return _json(self,200,{"ok":True,"status":g.TOOLS["gallery_duplicate_status"][1]({}),"exact":g.TOOLS["gallery_exact_duplicates"][1]({"limit":100}),"near":g.TOOLS["gallery_near_duplicates"][1]({"limit":100,"threshold":3})})
             if path=="/api/thumb":
                 result=g.gallery_thumbnail({"id":int(q["id"][0]),"max_edge":384});block=result["__mcp_content__"][0];raw=base64.b64decode(block["data"])
@@ -64,6 +67,10 @@ class Handler(BaseHTTPRequestHandler):
             path=urlparse(self.path).path;body=_read_json(self)
             if path=="/api/settings":return _json(self,200,g.TOOLS["gallery_settings_update"][1]({"changes":body}))
             if path=="/api/reconcile":return _json(self,200,g.TOOLS["gallery_reconcile"][1]({"reason":str(body.get("reason","dashboard"))[:80]}))
+            if path=="/api/cleanup/plan":return _json(self,200,g.TOOLS["gallery_cleanup_plan"][1]({"ids":body.get("ids",[]),"undo_hours":body.get("undo_hours",72)}))
+            if path in {"/api/cleanup/quarantine","/api/cleanup/restore","/api/cleanup/purge"}:
+                tool={"/api/cleanup/quarantine":"gallery_cleanup_quarantine","/api/cleanup/restore":"gallery_cleanup_restore","/api/cleanup/purge":"gallery_cleanup_purge"}[path]
+                return _json(self,200,g.TOOLS[tool][1]({"plan_id":body.get("plan_id",""),"approved":body.get("approved") is True,"confirm_plan_id":body.get("confirm_plan_id","")}))
             self.send_error(404)
         except Exception as exc:self._error(exc)
 

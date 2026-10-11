@@ -126,3 +126,46 @@ class SearchV030Tests(AddonFeatureTests):
         content=result['__mcp_content__'];self.assertEqual(content[0]['type'],'image');self.assertEqual(content[0]['mimeType'],'image/jpeg');self.assertGreater(len(content[0]['data']),100)
         import json as _json
         meta=_json.loads(content[1]['text']);self.assertGreaterEqual(meta['count'],1);self.assertEqual(meta['search_mode'],'hybrid-rrf-v2')
+
+class CleanupV040Tests(AddonFeatureTests):
+    def _item(self,name):
+        return next(x for x in self.g.gallery_list({'limit':50})['items'] if x['name']==name)
+    def _confirm(self,tool,plan_id):
+        return self.g.TOOLS[tool][1]({'plan_id':plan_id,'approved':True,'confirm_plan_id':plan_id})
+
+    def test_quarantine_then_restore_roundtrip_and_ocr_cleanup(self):
+        item=self._item('black.jpg');source=self.g.SHARED_ROOT/item['path'];self.assertTrue(source.is_file())
+        self.g.gallery_ocr_status({})
+        with self.g._db() as c:
+            c.execute("INSERT OR REPLACE INTO gallery_ocr_index(image_id,size,mtime,languages,processed_at,text_length,error) VALUES(?,?,?,?,?,?,NULL)",(item['id'],item['size'],item['mtime'],'rus+lav+eng',1234.0,4))
+            c.execute("INSERT OR REPLACE INTO gallery_ocr_fts(rowid,content) VALUES(?,?)",(item['id'],'TEST'))
+        plan=self.g.TOOLS['gallery_cleanup_plan'][1]({'ids':[item['id']],'undo_hours':1});pid=plan['plan_id']
+        with self.assertRaises(PermissionError):self.g.TOOLS['gallery_cleanup_quarantine'][1]({'plan_id':pid,'approved':False,'confirm_plan_id':pid})
+        result=self._confirm('gallery_cleanup_quarantine',pid);self.assertEqual(result['state'],'QUARANTINED');self.assertFalse(source.exists())
+        loaded=self.g.TOOLS['gallery_cleanup_plan_get'][1]({'plan_id':pid});self.assertEqual(loaded['state'],'QUARANTINED');q=self.g.SHARED_ROOT/loaded['actions'][0]['quarantine_path'];self.assertTrue(q.is_file())
+        with self.g._db() as c:
+            self.assertIsNone(c.execute('SELECT 1 FROM images WHERE id=?',(item['id'],)).fetchone());self.assertIsNone(c.execute('SELECT 1 FROM gallery_ocr_index WHERE image_id=?',(item['id'],)).fetchone());self.assertIsNone(c.execute('SELECT 1 FROM gallery_ocr_fts WHERE rowid=?',(item['id'],)).fetchone())
+        restored=self._confirm('gallery_cleanup_restore',pid);self.assertEqual(restored['state'],'RESTORED');self.assertTrue(source.is_file());self.assertFalse(q.exists())
+        scan=self.g.gallery_scan({});self.assertTrue(scan['ok']);self.assertTrue(any(x['name']=='black.jpg' for x in self.g.gallery_list({'limit':50})['items']))
+
+    def test_purge_requires_undo_window_then_is_irreversible(self):
+        item=self._item('screenshot_1.png');source=self.g.SHARED_ROOT/item['path'];plan=self.g.TOOLS['gallery_cleanup_plan'][1]({'ids':[item['id']],'undo_hours':1});pid=plan['plan_id'];self._confirm('gallery_cleanup_quarantine',pid)
+        with self.assertRaises(PermissionError):self._confirm('gallery_cleanup_purge',pid)
+        with self.g._db() as c:
+            row=c.execute('SELECT payload FROM gallery_cleanup_plans WHERE plan_id=?',(pid,)).fetchone();payload=__import__('json').loads(row['payload']);payload['purge_after']=0;c.execute('UPDATE gallery_cleanup_plans SET payload=? WHERE plan_id=?',(__import__('json').dumps(payload,separators=(',',':')),pid))
+        result=self._confirm('gallery_cleanup_purge',pid);self.assertTrue(result['ok']);self.assertEqual(result['state'],'PURGED');self.assertFalse(source.exists());self.assertTrue(result['irreversible'])
+        loaded=self.g.TOOLS['gallery_cleanup_plan_get'][1]({'plan_id':pid});self.assertEqual(loaded['state'],'PURGED');self.assertTrue(all(a['state']=='PURGED' for a in loaded['actions']))
+
+    def test_android_data_plan_cannot_mutate(self):
+        with self.g._db() as c:
+            iid=c.execute("INSERT INTO images(path,name,album,size,mtime,seen,mime) VALUES(?,?,?,?,?,?,?)",('shizuku:///storage/emulated/0/Android/data/demo/files/x.jpg','x.jpg','Android/data/demo',10,1.0,1,'image/jpeg')).lastrowid
+        plan=self.g.TOOLS['gallery_cleanup_plan'][1]({'ids':[iid]});pid=plan['plan_id']
+        with self.assertRaises(PermissionError):self._confirm('gallery_cleanup_quarantine',pid)
+        self.assertEqual(self.g.TOOLS['gallery_cleanup_plan_get'][1]({'plan_id':pid})['state'],'PROPOSED')
+
+    def test_quarantine_symlink_root_is_refused_before_move(self):
+        item=self._item('black.jpg');source=self.g.SHARED_ROOT/item['path'];outside=self.g.SHARED_ROOT.parent/'outside-quarantine';outside.mkdir(exist_ok=True)
+        qroot=self.g.SHARED_ROOT/'.photo-intelligence-quarantine';qroot.symlink_to(outside,target_is_directory=True)
+        plan=self.g.TOOLS['gallery_cleanup_plan'][1]({'ids':[item['id']]});pid=plan['plan_id']
+        with self.assertRaises(ValueError):self._confirm('gallery_cleanup_quarantine',pid)
+        self.assertTrue(source.is_file());self.assertEqual(self.g.TOOLS['gallery_cleanup_plan_get'][1]({'plan_id':pid})['state'],'PROPOSED')
