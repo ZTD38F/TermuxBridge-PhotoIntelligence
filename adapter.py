@@ -16,8 +16,8 @@ ADDON_METADATA={"name":"photo-intelligence","version":ADDON_VERSION,"abi":1,"bri
 TOOLS=gallery.TOOLS
 DESCRIPTIONS=gallery.DESCRIPTIONS
 READ_ONLY=gallery.READ_ONLY
-DESTRUCTIVE=set()
-OPEN_WORLD=set()
+DESTRUCTIVE=getattr(gallery,"DESTRUCTIVE",set())
+OPEN_WORLD=getattr(gallery,"OPEN_WORLD",set())
 VIRTUAL_SCHEMES={"gallery":"virtual_read"}
 
 def virtual_read(path: str, max_chars: int = 100000):

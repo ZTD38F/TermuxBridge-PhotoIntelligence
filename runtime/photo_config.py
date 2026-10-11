@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 ADDON_NAME = "photo-intelligence"
-ADDON_VERSION = "0.3.0"
+ADDON_VERSION = "0.4.0"
 ADDON_ABI = 1
 BRIDGE_MAJOR = 1
 
@@ -25,6 +25,10 @@ EXCHANGE_DIR = Path(os.environ.get(
     "PHOTO_INTELLIGENCE_EXCHANGE_DIR",
     str(SHARED_ROOT / ".termuxbridge-photo-intelligence"),
 ))
+QUARANTINE_DIR = Path(os.environ.get(
+    "PHOTO_INTELLIGENCE_QUARANTINE_DIR",
+    str(SHARED_ROOT / ".photo-intelligence-quarantine"),
+)).resolve()
 LEGACY_STATE_DIR = Path.home() / ".termux-mcp-bridge"
 
 def ensure_dirs() -> None:
