@@ -4,11 +4,21 @@ Author: @dvkrum
 import os
 import unittest
 
-import numpy as np
+from array import array
 from PIL import Image, UnidentifiedImageError
 
 from test_addon_features import AddonFeatureTests
 import gallery_semantic
+
+
+class FakeVector:
+    """Only the two ndarray methods used by the semantic index are needed."""
+    def astype(self, dtype):
+        assert dtype == "float32"
+        return self
+
+    def tobytes(self):
+        return array("f", [1.0] * 512).tobytes()
 
 
 class DecoderFailureTests(unittest.TestCase):
@@ -51,7 +61,7 @@ class DecoderFailureTests(unittest.TestCase):
             if row["name"]==self.bad.name:
                 with Image.open(self.bad) as image:
                     image.verify()
-            return np.ones(512,dtype=np.float32)
+            return FakeVector()
         gallery_semantic.image_embedding=fake_embed
         def restore():
             gallery_semantic.available=original_available
