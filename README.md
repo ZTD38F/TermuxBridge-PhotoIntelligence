@@ -54,6 +54,21 @@ Photo Intelligence
 
 TermuxBridge remains a generic bridge. Photo-specific code and state belong to this repository/addon.
 
+## Read-only upgrade preflight
+
+Before upgrading an installed addon, run the check against the candidate
+source tree on the same Android device:
+
+    python scripts/upgrade_preflight.py --candidate "$PWD"
+
+The check uses read-only SQLite access and never touches source photos or
+restarts services. It verifies addon identity, authorship, ABI, strict version
+progression, minimum bridge version, schema compatibility, database integrity,
+and free storage. Exit code 0 means these static preconditions pass; it
+does not prove that an upgrade, service takeover, or rollback works.
+Exit code 1 means preconditions are blocked. Do not perform a production
+installation until staged migration and rollback tests pass.
+
 ## Permissions and privacy
 
 Processing is local. Source photos are read-only during indexing and analysis. The semantic model and OCR run on-device. No photo is uploaded by the addon.
