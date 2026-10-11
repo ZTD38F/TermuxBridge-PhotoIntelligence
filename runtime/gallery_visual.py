@@ -5,7 +5,7 @@ from __future__ import annotations
 import math, statistics, time
 from typing import Any
 import gallery_shizuku
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 def install(g: dict[str, Any]) -> None:
     schema=g["_schema"]; tools=g["TOOLS"]; descriptions=g["DESCRIPTIONS"]; readonly=g["READ_ONLY"]; db=g["_db"]
@@ -87,6 +87,27 @@ def install(g: dict[str, Any]) -> None:
                 ok.append(int(row["id"]))
             except gallery_shizuku.ShizukuUnavailable:
                 deferred.add("android_data_shizuku"); shizuku_available=False
+            except g["UnidentifiedImageError"]:
+                # A missing Pillow decoder is not a reason to retry the same file
+                # on every short scheduler cycle. Never touch the source file.
+                try:
+                    g["_validate_row"](row)
+                    with db() as c:
+                        ensure(c)
+                        c.execute("""INSERT INTO gallery_visual_features(
+                            image_id,size,mtime,processed_at,error)
+                            VALUES(?,?,?,?,'UnidentifiedImageError')
+                            ON CONFLICT(image_id) DO UPDATE SET
+                            size=excluded.size,mtime=excluded.mtime,
+                            processed_at=excluded.processed_at,
+                            brightness=NULL,contrast=NULL,sharpness=NULL,entropy=NULL,
+                            dominant_color=NULL,screenshot_score=NULL,
+                            width=NULL,height=NULL,dhash=NULL,error=excluded.error""",
+                            (row["id"],row["size"],row["mtime"],time.time()))
+                except Exception as exc:
+                    errors.append({"id":int(row["id"]),"error":type(exc).__name__})
+                else:
+                    errors.append({"id":int(row["id"]),"error":"UnidentifiedImageError"})
             except Exception as exc:
                 errors.append({"id":int(row["id"]),"error":type(exc).__name__})
         return {"ok":True,"indexed_ids":ok,"errors":errors,"engine":VERSION,"source_photos_modified":False,
@@ -95,12 +116,14 @@ def install(g: dict[str, Any]) -> None:
         with db() as c:
             ensure(c); total=c.execute("SELECT COUNT(*) FROM images").fetchone()[0]
             sh_total=c.execute("SELECT COUNT(*) FROM images WHERE path LIKE 'shizuku://%'").fetchone()[0]
-            done=c.execute("SELECT COUNT(*) FROM gallery_visual_features v JOIN images i ON i.id=v.image_id WHERE v.size=i.size AND v.mtime=i.mtime").fetchone()[0]
-            sh_done=c.execute("SELECT COUNT(*) FROM gallery_visual_features v JOIN images i ON i.id=v.image_id WHERE v.size=i.size AND v.mtime=i.mtime AND i.path LIKE 'shizuku://%'").fetchone()[0]
-        local_total=total-sh_total; local_done=done-sh_done
-        return {"ok":True,"total":total,"indexed":done,"remaining":max(0,total-done),"percent":round(done*100/total,2) if total else 100.0,
-                "local":{"total":local_total,"indexed":local_done,"remaining":max(0,local_total-local_done)},
-                "android_data":{"total":sh_total,"indexed":sh_done,"remaining":max(0,sh_total-sh_done),"available":gallery_shizuku.available_cached(ttl=30.0)},
+            done=c.execute("SELECT COUNT(*) FROM gallery_visual_features v JOIN images i ON i.id=v.image_id WHERE v.size=i.size AND v.mtime=i.mtime AND v.error IS NULL").fetchone()[0]
+            failed=c.execute("SELECT COUNT(*) FROM gallery_visual_features v JOIN images i ON i.id=v.image_id WHERE v.size=i.size AND v.mtime=i.mtime AND v.error IS NOT NULL").fetchone()[0]
+            sh_done=c.execute("SELECT COUNT(*) FROM gallery_visual_features v JOIN images i ON i.id=v.image_id WHERE v.size=i.size AND v.mtime=i.mtime AND v.error IS NULL AND i.path LIKE 'shizuku://%'").fetchone()[0]
+            sh_failed=c.execute("SELECT COUNT(*) FROM gallery_visual_features v JOIN images i ON i.id=v.image_id WHERE v.size=i.size AND v.mtime=i.mtime AND v.error IS NOT NULL AND i.path LIKE 'shizuku://%'").fetchone()[0]
+        local_total=total-sh_total; local_done=done-sh_done; local_failed=failed-sh_failed
+        return {"ok":True,"total":total,"indexed":done,"failed":failed,"remaining":max(0,total-done-failed),"percent":round(done*100/total,2) if total else 100.0,
+                "local":{"total":local_total,"indexed":local_done,"failed":local_failed,"remaining":max(0,local_total-local_done-local_failed)},
+                "android_data":{"total":sh_total,"indexed":sh_done,"failed":sh_failed,"remaining":max(0,sh_total-sh_done-sh_failed),"available":gallery_shizuku.available_cached(ttl=30.0)},
                 "engine":VERSION,"semantic_backend":"not_configured"}
     def visual_search(args):
         color=str(args.get("color","")).strip().lower(); screenshot=args.get("screenshot"); limit=max(1,min(int(args.get("limit",100)),500))
