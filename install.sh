@@ -84,10 +84,11 @@ if [[ -n "$APK" && -r "$APK" ]]; then
   unzip -p "$APK" assets/rish > "$HOME/bin/rish.tmp" || true
   unzip -p "$APK" assets/rish_shizuku.dex > "$HOME/bin/rish_shizuku.dex.tmp" || true
   if [[ -s "$HOME/bin/rish.tmp" && -s "$HOME/bin/rish_shizuku.dex.tmp" ]]; then
-    sed 's/export RISH_APPLICATION_ID="PKG"/export RISH_APPLICATION_ID="com.termux"/' "$HOME/bin/rish.tmp" > "$HOME/bin/rish"
-    mv "$HOME/bin/rish_shizuku.dex.tmp" "$HOME/bin/rish_shizuku.dex"
+    sed 's/export RISH_APPLICATION_ID="PKG"/export RISH_APPLICATION_ID="com.termux"/' "$HOME/bin/rish.tmp" > "$HOME/bin/rish.new"
+    chmod 500 "$HOME/bin/rish.new"; chmod 400 "$HOME/bin/rish_shizuku.dex.tmp"
+    mv -f "$HOME/bin/rish.new" "$HOME/bin/rish"
+    mv -f "$HOME/bin/rish_shizuku.dex.tmp" "$HOME/bin/rish_shizuku.dex"
     rm -f "$HOME/bin/rish.tmp"
-    chmod 500 "$HOME/bin/rish"; chmod 400 "$HOME/bin/rish_shizuku.dex"
   fi
 fi
 

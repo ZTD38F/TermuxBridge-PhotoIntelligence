@@ -9,7 +9,7 @@ Local-first Android photo intelligence addon for **TermuxBridge**. It builds a p
 Prerequisite: TermuxBridge 1.2.31+ must already be installed and connected to ChatGPT.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ZTD38F/TermuxBridge-PhotoIntelligence/stable/install.sh | bash
+curl -fsSL -H 'Accept: application/vnd.github.raw+json' 'https://api.github.com/repos/ZTD38F/TermuxBridge-PhotoIntelligence/contents/install.sh?ref=stable' | bash
 ```
 
 The installer updates an older TermuxBridge when possible, installs local dependencies, OCR languages and the quantized CLIP model, imports an existing legacy photo index if present, registers the addon, starts its services, reloads TermuxBridge and opens the local dashboard.
