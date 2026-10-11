@@ -24,7 +24,7 @@ fi
 [[ -n "$BV" ]] && version_ge_1231 "$BV" || fail "TermuxBridge 1.2.31+ is required."
 
 say "Installing local dependencies..."
-pkg install -y python python-pillow python-numpy python-onnxruntime tesseract ffmpeg exiftool curl git unzip termux-api >/dev/null
+pkg install -y python python-pillow python-numpy python-onnxruntime tesseract ffmpeg exiftool curl git unzip termux-api inotify-tools >/dev/null
 
 say "Ensuring OCR languages (eng, rus, lav)..."
 TESSDATA="$PREFIX/share/tessdata"; mkdir -p "$TESSDATA"

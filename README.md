@@ -69,3 +69,7 @@ The intended mutation pipeline is:
 The current analysis/planning APIs stop before destructive application. Source files are not removed automatically.
 
 See `docs/ARCHITECTURE.md` and `docs/SAFETY.md`.
+
+### Realtime pipeline
+
+From v0.2.0, a unified scheduler coordinates scan → OCR → visual → duplicate → semantic processing. Local file events trigger near-real-time reconciliation when `inotifywait` is available, while periodic reconciliation guarantees eventual consistency. The dashboard can switch between Balanced, Fast and Unlimited processing profiles without restarting the addon.

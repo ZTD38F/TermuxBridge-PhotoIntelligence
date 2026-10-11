@@ -67,7 +67,7 @@ def main():
         if os.environ.get("PHOTO_INTELLIGENCE_DISABLE_WAKE_LOCK","0") != "1" and shutil.which("termux-wake-lock"):
             wake_lock=subprocess.run(["termux-wake-lock"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False).returncode==0
         children={}
-        specs={"worker":(RUNTIME/"gallery_worker.py","worker.log"),"analysis":(RUNTIME/"analysis_worker.py","analysis.log"),"dashboard":(RUNTIME/"dashboard_server.py","dashboard.log")}
+        specs={"pipeline":(RUNTIME/"pipeline_scheduler.py","pipeline.log"),"watcher":(RUNTIME/"source_watcher.py","watcher.log"),"dashboard":(RUNTIME/"dashboard_server.py","dashboard.log")}
         try:
             while not STOP:
                 for name,(script,log) in specs.items():

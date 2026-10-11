@@ -29,3 +29,15 @@ From v0.1.3, local shared-storage work and Shizuku-backed Android/data work use 
 ## Release transition cleanup
 
 From v0.1.4, the one-click installer runs a scoped stale-worker reaper after the normal addon shutdown and before restart. It identifies only Photo Intelligence processes under the addon root and current Termux UID, tries SIGTERM first, then applies a bounded force-stop only after revalidating the same PID/start identity. This prevents orphan workers from an older release from holding advisory locks after an update.
+
+## Unified pipeline scheduler (v0.2.0)
+
+Photo Intelligence now uses one scheduler for metadata reconciliation, OCR, visual features, exact-duplicate hashing and CLIP embeddings. A lightweight source watcher only signals that local storage changed; it never reads image content. `inotifywait` is used when available, with bounded polling plus periodic full reconciliation as the fallback.
+
+Processing profiles are centralized: `balanced`, `fast`, and `unlimited`. The scheduler is the single owner of battery/thermal policy, so individual engines do not apply contradictory thresholds. Every engine remains resumable from SQLite and source isolation remains in effect.
+
+The local dashboard exposes source state, per-stage coverage, pipeline health, settings/profile changes, immediate reconciliation and search/cleanup/duplicate views.
+
+## Schema migrations
+
+SQLite changes are versioned through `PRAGMA user_version`. Before a schema version upgrade, a SQLite backup API snapshot is written under the addon's private `state/backups` directory; only the three newest schema-transition backups are retained.
