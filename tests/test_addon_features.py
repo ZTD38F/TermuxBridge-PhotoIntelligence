@@ -97,3 +97,32 @@ class SourceIsolationTests(AddonFeatureTests):
             self.assertGreaterEqual(len(result['indexed_ids']),2);self.assertIn('android_data_shizuku',result['deferred_sources'])
             status=self.g.TOOLS['gallery_duplicate_status'][1]({});self.assertEqual(status['android_data']['remaining'],1);self.assertGreaterEqual(status['local']['indexed'],2)
         finally:gallery_shizuku.available_cached=original
+
+class SearchV030Tests(AddonFeatureTests):
+    def test_multilingual_visual_query_variants(self):
+        import gallery_smart_search
+        self.assertEqual(gallery_smart_search.semantic_variants('чёрная рубашка')[1],'black shirt')
+        self.assertEqual(gallery_smart_search.semantic_variants('melns krekls')[1],'black shirt')
+
+    def test_hybrid_metadata_ranking_and_reasons(self):
+        result=self.g.TOOLS['gallery_hybrid_search'][1]({'query':'black.jpg','limit':10})
+        self.assertTrue(result['ok']);self.assertGreaterEqual(result['count'],1)
+        self.assertEqual(result['items'][0]['name'],'black.jpg')
+        self.assertIn('metadata',result['items'][0]['match'])
+        self.assertTrue(result['items'][0]['reasons'])
+
+    def test_hybrid_ocr_signal(self):
+        target=next(x for x in self.g.gallery_list({'limit':20})['items'] if x['name']=='screenshot_1.png')
+        with self.g._db() as c:
+            self.g.gallery_ocr_status({})
+            c.execute("INSERT OR REPLACE INTO gallery_ocr_index(image_id,size,mtime,languages,processed_at,text_length,error) VALUES(?,?,?,?,?,?,NULL)",(target['id'],target['size'],target['mtime'],'rus+lav+eng',1234.0,14))
+            c.execute("DELETE FROM gallery_ocr_fts WHERE rowid=?",(target['id'],))
+            c.execute("INSERT INTO gallery_ocr_fts(rowid,content) VALUES(?,?)",(target['id'],'AMAZON RECEIPT'))
+        result=self.g.TOOLS['gallery_hybrid_search'][1]({'query':'AMAZON RECEIPT','limit':10})
+        found=next(x for x in result['items'] if x['id']==target['id']);self.assertIn('ocr',found['match'])
+
+    def test_search_contact_sheet(self):
+        result=self.g.TOOLS['gallery_search_contact_sheet'][1]({'query':'black.jpg','limit':4,'columns':2})
+        content=result['__mcp_content__'];self.assertEqual(content[0]['type'],'image');self.assertEqual(content[0]['mimeType'],'image/jpeg');self.assertGreater(len(content[0]['data']),100)
+        import json as _json
+        meta=_json.loads(content[1]['text']);self.assertGreaterEqual(meta['count'],1);self.assertEqual(meta['search_mode'],'hybrid-rrf-v2')

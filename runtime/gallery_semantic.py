@@ -141,7 +141,11 @@ def install(g: dict[str,Any]) -> None:
                 params=[MODEL_ID]
                 if not shizuku_available:
                     sql += " AND i.path NOT LIKE 'shizuku://%'"; deferred.add("android_data_shizuku")
-                sql += " ORDER BY i.mtime DESC LIMIT ?"; params.append(limit)
+                sql += """ ORDER BY CASE
+                    WHEN lower(i.name) LIKE '%sticker%' OR lower(i.path) LIKE '%/cache/%' OR lower(i.path) LIKE '%/stickers/%' THEN 3
+                    WHEN lower(i.album) LIKE '%dcim/camera%' OR lower(i.name) LIKE 'img_%' OR lower(i.name) LIKE '10000%' THEN 0
+                    WHEN lower(i.name) LIKE '%screenshot%' THEN 1
+                    ELSE 2 END, i.mtime DESC LIMIT ?"""; params.append(limit)
                 rows=c.execute(sql,params).fetchall()
         ok=[];errors=[]
         for row in rows:
