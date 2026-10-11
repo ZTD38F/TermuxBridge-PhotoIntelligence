@@ -127,21 +127,22 @@ def install(g:dict[str,Any])->None:
     def status(_):
         with db() as c:
             ensure(c);total=c.execute("SELECT COUNT(*) FROM gallery_videos").fetchone()[0]
-            analyzed=c.execute("SELECT COUNT(*) FROM gallery_videos WHERE processed_at IS NOT NULL AND error IS NULL").fetchone()[0]
+            analyzed=c.execute("SELECT COUNT(*) FROM gallery_videos WHERE processed_at IS NOT NULL").fetchone()[0]
+            failed=c.execute("SELECT COUNT(*) FROM gallery_videos WHERE processed_at IS NOT NULL AND error IS NOT NULL").fetchone()[0]
             frames=c.execute("""SELECT COUNT(*) FROM gallery_video_frames f JOIN gallery_videos v ON v.id=f.video_id
               WHERE f.source_size=v.size AND f.source_mtime=v.mtime AND f.error IS NULL""").fetchone()[0]
             semantic=c.execute("""SELECT COUNT(*) FROM gallery_video_frames f JOIN gallery_videos v ON v.id=f.video_id
               WHERE f.source_size=v.size AND f.source_mtime=v.mtime AND f.embedding IS NOT NULL""").fetchone()[0]
             remote=c.execute("SELECT COUNT(*) FROM gallery_videos WHERE path LIKE 'shizuku://%'").fetchone()[0]
-        return {"ok":True,"total":total,"analyzed":analyzed,"remaining":max(0,total-analyzed),"percent":round(analyzed*100/total,2) if total else 100.0,"keyframes":frames,"semantic_keyframes":semantic,"android_data":remote,"android_data_available":gallery_shizuku.available_cached(ttl=30.0),"engine":VERSION}
+        return {"ok":True,"total":total,"analyzed":analyzed,"failed":failed,"remaining":max(0,total-analyzed),"percent":round(analyzed*100/total,2) if total else 100.0,"keyframes":frames,"semantic_keyframes":semantic,"android_data":remote,"android_data_available":gallery_shizuku.available_cached(ttl=30.0),"engine":VERSION}
     def index(args):
         limit=max(1,min(int(args.get("limit",1)),16));nframes=max(1,min(int(args.get("frames",4)),8));max_bytes=max(16,min(int(args.get("max_megabytes",512)),4096))*1048576;languages=str(args.get("languages","eng"))
         semantic_on=semantic_available();sh_available=gallery_shizuku.available_cached(ttl=30.0)
         with db() as c:
             ensure(c)
             sql="""SELECT v.* FROM gallery_videos v WHERE
-              v.processed_at IS NULL OR v.error IS NOT NULL OR
-              NOT EXISTS(SELECT 1 FROM gallery_video_frames f WHERE f.video_id=v.id AND f.source_size=v.size AND f.source_mtime=v.mtime)"""
+              v.processed_at IS NULL OR
+              (v.error IS NULL AND NOT EXISTS(SELECT 1 FROM gallery_video_frames f WHERE f.video_id=v.id AND f.source_size=v.size AND f.source_mtime=v.mtime))"""
             if semantic_on:sql+=" OR EXISTS(SELECT 1 FROM gallery_video_frames f WHERE f.video_id=v.id AND f.source_size=v.size AND f.source_mtime=v.mtime AND f.embedding IS NULL)"
             if not sh_available:sql="SELECT * FROM ("+sql+") q WHERE q.path NOT LIKE 'shizuku://%'"
             sql+=" ORDER BY mtime DESC LIMIT ?";rows=c.execute(sql,(limit,)).fetchall()
