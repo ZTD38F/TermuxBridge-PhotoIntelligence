@@ -23,9 +23,9 @@ def _read_json(handler,max_bytes=65536):
     return value
 
 def status():
-    base=g.gallery_status({});ocr=g.gallery_ocr_status({});metadata=g.TOOLS["gallery_metadata_status"][1]({});visual=g.TOOLS["gallery_visual_status"][1]({});semantic=g.TOOLS["gallery_semantic_status"][1]({});duplicates=g.TOOLS["gallery_duplicate_status"][1]({});sources=g.TOOLS["gallery_source_status"][1]({});pipeline=g.TOOLS["gallery_pipeline_status"][1]({});health=g.TOOLS["gallery_health"][1]({});settings=g.TOOLS["gallery_settings_get"][1]({})
+    base=g.gallery_status({});ocr=g.gallery_ocr_status({});metadata=g.TOOLS["gallery_metadata_status"][1]({});visual=g.TOOLS["gallery_visual_status"][1]({});semantic=g.TOOLS["gallery_semantic_status"][1]({});taxonomy=g.TOOLS["gallery_taxonomy_status"][1]({});duplicates=g.TOOLS["gallery_duplicate_status"][1]({});sources=g.TOOLS["gallery_source_status"][1]({});pipeline=g.TOOLS["gallery_pipeline_status"][1]({});health=g.TOOLS["gallery_health"][1]({});settings=g.TOOLS["gallery_settings_get"][1]({})
     sh=sources.get("sources",{}).get("android_data_shizuku",{}).get("indexed",0)
-    return {"ok":True,"library":{"total":base.get("indexed",0),"shizuku":sh,"albums":base.get("albums",0),"last_scan":base.get("last_scan")},"sources":sources,"ocr":ocr,"metadata":metadata,"visual":visual,"semantic":semantic,"duplicates":duplicates,"pipeline":pipeline,"health":health,"settings":settings,"db_integrity":base.get("db_integrity"),"free_storage_gib":base.get("free_storage_gib")}
+    return {"ok":True,"library":{"total":base.get("indexed",0),"shizuku":sh,"albums":base.get("albums",0),"last_scan":base.get("last_scan")},"sources":sources,"ocr":ocr,"metadata":metadata,"visual":visual,"semantic":semantic,"taxonomy":taxonomy,"duplicates":duplicates,"pipeline":pipeline,"health":health,"settings":settings,"db_integrity":base.get("db_integrity"),"free_storage_gib":base.get("free_storage_gib")}
 
 class Handler(BaseHTTPRequestHandler):
     server_version="PhotoIntelligence/0.2"
@@ -55,6 +55,9 @@ class Handler(BaseHTTPRequestHandler):
             if path=="/api/smart-album":
                 return _json(self,200,g.TOOLS["gallery_smart_album_items"][1]({"album_id":q.get("album_id",[""])[0],"limit":min(200,int(q.get("limit",[100])[0])),"offset":max(0,int(q.get("offset",[0])[0]))}))
             if path=="/api/tags":return _json(self,200,g.TOOLS["gallery_tags"][1]({}))
+            if path=="/api/taxonomy/labels":return _json(self,200,g.TOOLS["gallery_taxonomy_labels"][1]({}))
+            if path=="/api/taxonomy":
+                return _json(self,200,g.TOOLS["gallery_taxonomy_search"][1]({"label":q.get("label",["document"])[0],"min_score":float(q.get("min_score",[0])[0]),"limit":min(200,int(q.get("limit",[100])[0]))}))
             if path=="/api/tag":
                 return _json(self,200,g.TOOLS["gallery_tag_items"][1]({"tag":q.get("tag",[""])[0],"limit":min(200,int(q.get("limit",[100])[0])),"offset":max(0,int(q.get("offset",[0])[0]))}))
             if path=="/api/cleanup":return _json(self,200,g.TOOLS["gallery_cleanup_candidates"][1]({"limit":200}))

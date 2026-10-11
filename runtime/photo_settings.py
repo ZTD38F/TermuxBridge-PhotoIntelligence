@@ -9,11 +9,11 @@ from photo_config import STATE_DIR
 
 SETTINGS=STATE_DIR/"settings.json"
 PROFILES={
-    "balanced":{"scan_interval":300,"metadata_images":64,"ocr_images":48,"ocr_seconds":180,"visual_images":24,"duplicate_images":48,"duplicate_mb":256,"semantic_images":2,"idle_sleep":5.0,"busy_sleep":0.15,"thermal_pause_c":45.0,"min_battery":15},
-    "fast":{"scan_interval":120,"metadata_images":128,"ocr_images":96,"ocr_seconds":360,"visual_images":48,"duplicate_images":96,"duplicate_mb":512,"semantic_images":4,"idle_sleep":2.0,"busy_sleep":0.05,"thermal_pause_c":47.0,"min_battery":10},
-    "unlimited":{"scan_interval":60,"metadata_images":256,"ocr_images":128,"ocr_seconds":900,"visual_images":96,"duplicate_images":192,"duplicate_mb":1024,"semantic_images":8,"idle_sleep":1.0,"busy_sleep":0.02,"thermal_pause_c":55.0,"min_battery":1},
+    "balanced":{"scan_interval":300,"metadata_images":64,"taxonomy_images":128,"ocr_images":48,"ocr_seconds":180,"visual_images":24,"duplicate_images":48,"duplicate_mb":256,"semantic_images":2,"idle_sleep":5.0,"busy_sleep":0.15,"thermal_pause_c":45.0,"min_battery":15},
+    "fast":{"scan_interval":120,"metadata_images":128,"taxonomy_images":256,"ocr_images":96,"ocr_seconds":360,"visual_images":48,"duplicate_images":96,"duplicate_mb":512,"semantic_images":4,"idle_sleep":2.0,"busy_sleep":0.05,"thermal_pause_c":47.0,"min_battery":10},
+    "unlimited":{"scan_interval":60,"metadata_images":256,"taxonomy_images":512,"ocr_images":128,"ocr_seconds":900,"visual_images":96,"duplicate_images":192,"duplicate_mb":1024,"semantic_images":8,"idle_sleep":1.0,"busy_sleep":0.02,"thermal_pause_c":55.0,"min_battery":1},
 }
-DEFAULT={"profile":"balanced","languages":"rus+lav+eng","watch_local":True,"auto_scan":True,"auto_metadata":True,"auto_ocr":True,"auto_visual":True,"auto_duplicates":True,"auto_semantic":True,"dashboard_token_required":False}
+DEFAULT={"profile":"balanced","languages":"rus+lav+eng","watch_local":True,"auto_scan":True,"auto_metadata":True,"auto_ocr":True,"auto_visual":True,"auto_duplicates":True,"auto_semantic":True,"auto_taxonomy":True,"dashboard_token_required":False}
 ALLOWED=set(DEFAULT)
 
 def _atomic(path:Path,payload:dict[str,Any]):

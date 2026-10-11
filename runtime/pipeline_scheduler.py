@@ -82,9 +82,9 @@ def run_stage(name,fn,metrics,cfg,b):
     return result,elapsed
 
 def coverage():
-    o=g.gallery_ocr_status({});m=g.TOOLS["gallery_metadata_status"][1]({});v=g.TOOLS["gallery_visual_status"][1]({});s=g.TOOLS["gallery_semantic_status"][1]({});d=g.TOOLS["gallery_duplicate_status"][1]({});src=g.TOOLS["gallery_source_status"][1]({})
+    o=g.gallery_ocr_status({});m=g.TOOLS["gallery_metadata_status"][1]({});v=g.TOOLS["gallery_visual_status"][1]({});s=g.TOOLS["gallery_semantic_status"][1]({});t=g.TOOLS["gallery_taxonomy_status"][1]({});d=g.TOOLS["gallery_duplicate_status"][1]({});src=g.TOOLS["gallery_source_status"][1]({})
     total=int(o.get("indexed",0) or 0);processed=int(o.get("ocr_indexed",0) or 0)+int(o.get("ocr_failed",0) or 0)
-    return {"library":total,"metadata":m,"ocr":{"processed":processed,"remaining":max(0,total-processed),"percent":round(processed*100/total,2) if total else 100.0,"sources":o.get("ocr_sources",{})},"visual":v,"semantic":s,"duplicates":d,"sources":src}
+    return {"library":total,"metadata":m,"ocr":{"processed":processed,"remaining":max(0,total-processed),"percent":round(processed*100/total,2) if total else 100.0,"sources":o.get("ocr_sources",{})},"visual":v,"semantic":s,"taxonomy":t,"duplicates":d,"sources":src}
 
 def write_legacy_ocr(cov,last_batch,state):
     ocr=cov["ocr"]; status={"ok":True,"state":state,"total":cov["library"],"processed":ocr["processed"],"recognized":max(0,ocr["processed"]-int(g.gallery_ocr_status({}).get("ocr_failed",0) or 0)),"failed":int(g.gallery_ocr_status({}).get("ocr_failed",0) or 0),"remaining":ocr["remaining"],"percent":ocr["percent"],"sources":ocr.get("sources",{}),"last_batch":last_batch,"timestamp":time.time()}
@@ -117,7 +117,9 @@ def main():
                         result,_=run_stage("duplicates",lambda:g.TOOLS["gallery_duplicate_index"][1]({"limit":int(cfg["duplicate_images"]),"max_megabytes":int(cfg["duplicate_mb"])}),metrics,cfg,b);last["duplicates"]=summarize(result);work=work or bool(result.get("indexed_ids"))
                     if cfg.get("auto_semantic",True):
                         result,_=run_stage("semantic",lambda:g.TOOLS["gallery_semantic_index"][1]({"limit":int(cfg["semantic_images"])}),metrics,cfg,b);last["semantic"]=summarize(result);work=work or bool(result.get("indexed_ids"))
-                cov=coverage();deferred=cov["sources"].get("deferred_sources",[]);all_done=(int(cov["metadata"].get("remaining",0))==0 and cov["ocr"]["remaining"]==0 and int(cov["visual"].get("remaining",0))==0 and int(cov["semantic"].get("remaining",0))==0 and int(cov["duplicates"].get("remaining",0))==0)
+                    if cfg.get("auto_taxonomy",True):
+                        result,_=run_stage("taxonomy",lambda:g.TOOLS["gallery_taxonomy_index"][1]({"limit":int(cfg["taxonomy_images"])}),metrics,cfg,b);last["taxonomy"]=summarize(result);work=work or bool(result.get("indexed_ids"))
+                cov=coverage();deferred=cov["sources"].get("deferred_sources",[]);all_done=(int(cov["metadata"].get("remaining",0))==0 and cov["ocr"]["remaining"]==0 and int(cov["visual"].get("remaining",0))==0 and int(cov["semantic"].get("remaining",0))==0 and int(cov["taxonomy"].get("remaining",0))==0 and int(cov["duplicates"].get("remaining",0))==0)
                 if not allowed:state="POWER_PAUSED"
                 elif all_done:state="COMPLETE"
                 elif work:state="RUNNING"

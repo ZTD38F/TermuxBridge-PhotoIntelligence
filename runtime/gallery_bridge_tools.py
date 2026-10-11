@@ -567,6 +567,8 @@ from gallery_cleanup import install as _install_photo_cleanup
 _install_photo_cleanup(globals())
 from gallery_semantic import install as _install_photo_semantic
 _install_photo_semantic(globals())
+from gallery_taxonomy import install as _install_photo_taxonomy
+_install_photo_taxonomy(globals())
 from gallery_smart_search import install as _install_photo_smart_search
 _install_photo_smart_search(globals())
 from gallery_duplicates import install as _install_photo_duplicates
