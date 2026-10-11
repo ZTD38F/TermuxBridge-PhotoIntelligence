@@ -5,7 +5,7 @@ Uses inotify when available; falls back to lightweight directory timestamp polli
 It never reads image contents and never mutates source files.
 """
 from __future__ import annotations
-import fcntl,json,os,shutil,signal,subprocess,time
+import fcntl,json,os,select,shutil,signal,subprocess,time
 from pathlib import Path
 from photo_config import SHARED_ROOT,STATE_DIR,ensure_dirs
 from photo_settings import effective
@@ -37,16 +37,19 @@ def status(mode,watched,last_event=None,error=None):
 def inotify_loop(watched):
     cmd=[shutil.which("inotifywait"),"-m","-r","-q","-e","close_write,create,moved_to,delete,moved_from","--format","%e|%w%f",*[str(x) for x in watched]]
     proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,start_new_session=True)
+    last_event=None
     try:
         while not STOP:
-            line=proc.stdout.readline() if proc.stdout else ""
-            if not line:
-                if proc.poll() is not None:raise RuntimeError("inotifywait exited")
-                time.sleep(.2);continue
+            if proc.poll() is not None:raise RuntimeError("inotifywait exited")
+            ready,_,_=select.select([proc.stdout],[],[],10.0) if proc.stdout else ([],[],[])
+            if not ready:
+                status("inotify",watched,last_event);continue
+            line=proc.stdout.readline()
+            if not line:continue
             event,path=(line.rstrip("\n").split("|",1)+[""])[:2]
             # Exchange files and hidden addon transport are not library changes.
             if "/.termuxbridge-photo-intelligence/" in path:continue
-            mark("inotify:"+event,path);status("inotify",watched,{"event":event,"timestamp":time.time()})
+            last_event={"event":event,"timestamp":time.time()};mark("inotify:"+event,path);status("inotify",watched,last_event)
     finally:
         if proc.poll() is None:
             proc.terminate()

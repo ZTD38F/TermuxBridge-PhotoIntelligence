@@ -38,3 +38,21 @@ class PipelineFoundationTests(unittest.TestCase):
         self.assertTrue(self.scheduler.due_scan(cfg,None)[0])
         self.scheduler.DIRTY.write_text('{}')
         self.assertEqual(self.scheduler.due_scan(cfg,time.time())[1],'event')
+
+class PipelineHeartbeatTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name);self.state=self.root/'state';self.state.mkdir()
+        self.old_env=os.environ.copy();os.environ['PHOTO_INTELLIGENCE_HOME']=str(self.root/'home');os.environ['PHOTO_INTELLIGENCE_STATE']=str(self.state)
+        import photo_config,pipeline_scheduler
+        importlib.reload(photo_config);importlib.reload(pipeline_scheduler)
+        self.scheduler=pipeline_scheduler;self.addCleanup(self.restore)
+    def restore(self):os.environ.clear();os.environ.update(self.old_env)
+    def test_long_stage_writes_heartbeat(self):
+        import threading
+        cfg={'profile':'balanced'};b={'available':True,'level':50,'charging':False,'temperature_c':30};metrics={}
+        out={}
+        def slow():time.sleep(5.4);return {'ok':True,'indexed_ids':[1]}
+        t=threading.Thread(target=lambda:out.setdefault('r',self.scheduler.run_stage('semantic',slow,metrics,cfg,b)));t.start();time.sleep(5.15)
+        hb=json.loads(self.scheduler.STATUS.read_text());self.assertEqual(hb['state'],'RUNNING');self.assertEqual(hb['phase'],'semantic');self.assertGreater(hb['timestamp'],0)
+        t.join(timeout=3);self.assertFalse(t.is_alive());self.assertTrue(out['r'][0]['ok'])
