@@ -23,9 +23,9 @@ def _read_json(handler,max_bytes=65536):
     return value
 
 def status():
-    base=g.gallery_status({});ocr=g.gallery_ocr_status({});visual=g.TOOLS["gallery_visual_status"][1]({});semantic=g.TOOLS["gallery_semantic_status"][1]({});duplicates=g.TOOLS["gallery_duplicate_status"][1]({});sources=g.TOOLS["gallery_source_status"][1]({});pipeline=g.TOOLS["gallery_pipeline_status"][1]({});health=g.TOOLS["gallery_health"][1]({});settings=g.TOOLS["gallery_settings_get"][1]({})
+    base=g.gallery_status({});ocr=g.gallery_ocr_status({});metadata=g.TOOLS["gallery_metadata_status"][1]({});visual=g.TOOLS["gallery_visual_status"][1]({});semantic=g.TOOLS["gallery_semantic_status"][1]({});duplicates=g.TOOLS["gallery_duplicate_status"][1]({});sources=g.TOOLS["gallery_source_status"][1]({});pipeline=g.TOOLS["gallery_pipeline_status"][1]({});health=g.TOOLS["gallery_health"][1]({});settings=g.TOOLS["gallery_settings_get"][1]({})
     sh=sources.get("sources",{}).get("android_data_shizuku",{}).get("indexed",0)
-    return {"ok":True,"library":{"total":base.get("indexed",0),"shizuku":sh,"albums":base.get("albums",0),"last_scan":base.get("last_scan")},"sources":sources,"ocr":ocr,"visual":visual,"semantic":semantic,"duplicates":duplicates,"pipeline":pipeline,"health":health,"settings":settings,"db_integrity":base.get("db_integrity"),"free_storage_gib":base.get("free_storage_gib")}
+    return {"ok":True,"library":{"total":base.get("indexed",0),"shizuku":sh,"albums":base.get("albums",0),"last_scan":base.get("last_scan")},"sources":sources,"ocr":ocr,"metadata":metadata,"visual":visual,"semantic":semantic,"duplicates":duplicates,"pipeline":pipeline,"health":health,"settings":settings,"db_integrity":base.get("db_integrity"),"free_storage_gib":base.get("free_storage_gib")}
 
 class Handler(BaseHTTPRequestHandler):
     server_version="PhotoIntelligence/0.2"
@@ -51,6 +51,12 @@ class Handler(BaseHTTPRequestHandler):
                 query=q.get("q",[""])[0].strip();return _json(self,200,g.TOOLS["gallery_smart_search"][1]({"query":query,"limit":min(200,int(q.get("limit",[100])[0]))}))
             if path=="/api/albums":return _json(self,200,g.gallery_albums({"limit":500}))
             if path=="/api/categories":return _json(self,200,g.TOOLS["gallery_categories"][1]({}))
+            if path=="/api/smart-albums":return _json(self,200,g.TOOLS["gallery_smart_albums"][1]({}))
+            if path=="/api/smart-album":
+                return _json(self,200,g.TOOLS["gallery_smart_album_items"][1]({"album_id":q.get("album_id",[""])[0],"limit":min(200,int(q.get("limit",[100])[0])),"offset":max(0,int(q.get("offset",[0])[0]))}))
+            if path=="/api/tags":return _json(self,200,g.TOOLS["gallery_tags"][1]({}))
+            if path=="/api/tag":
+                return _json(self,200,g.TOOLS["gallery_tag_items"][1]({"tag":q.get("tag",[""])[0],"limit":min(200,int(q.get("limit",[100])[0])),"offset":max(0,int(q.get("offset",[0])[0]))}))
             if path=="/api/cleanup":return _json(self,200,g.TOOLS["gallery_cleanup_candidates"][1]({"limit":200}))
             if path=="/api/cleanup/plan":return _json(self,200,g.TOOLS["gallery_cleanup_plan_get"][1]({"plan_id":q.get("plan_id",[""])[0]}))
             if path=="/api/quarantine":return _json(self,200,g.TOOLS["gallery_quarantine_status"][1]({}))
@@ -67,6 +73,10 @@ class Handler(BaseHTTPRequestHandler):
             path=urlparse(self.path).path;body=_read_json(self)
             if path=="/api/settings":return _json(self,200,g.TOOLS["gallery_settings_update"][1]({"changes":body}))
             if path=="/api/reconcile":return _json(self,200,g.TOOLS["gallery_reconcile"][1]({"reason":str(body.get("reason","dashboard"))[:80]}))
+            if path=="/api/smart-album/create":return _json(self,200,g.TOOLS["gallery_smart_album_create"][1]({"name":body.get("name",""),"criteria":body.get("criteria",{})}))
+            if path=="/api/smart-album/delete":return _json(self,200,g.TOOLS["gallery_smart_album_delete"][1]({"album_id":body.get("album_id",""),"confirm_album_id":body.get("confirm_album_id","")}))
+            if path=="/api/tag/add":return _json(self,200,g.TOOLS["gallery_tag_add"][1]({"ids":body.get("ids",[]),"tag":body.get("tag","")}))
+            if path=="/api/tag/remove":return _json(self,200,g.TOOLS["gallery_tag_remove"][1]({"ids":body.get("ids",[]),"tag":body.get("tag","")}))
             if path=="/api/cleanup/plan":return _json(self,200,g.TOOLS["gallery_cleanup_plan"][1]({"ids":body.get("ids",[]),"undo_hours":body.get("undo_hours",72)}))
             if path in {"/api/cleanup/quarantine","/api/cleanup/restore","/api/cleanup/purge"}:
                 tool={"/api/cleanup/quarantine":"gallery_cleanup_quarantine","/api/cleanup/restore":"gallery_cleanup_restore","/api/cleanup/purge":"gallery_cleanup_purge"}[path]
