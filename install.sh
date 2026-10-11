@@ -63,7 +63,8 @@ if [[ "${PHOTO_INTELLIGENCE_SKIP_SEMANTIC_MODEL:-0}" != "1" ]]; then
   mkdir -p "$MODEL_DIR"; chmod 700 "$ADDON_ROOT/models" "$MODEL_DIR" 2>/dev/null || true
   HF_REV="d15189d7028b43f1d3e65039190477f6af591c2a"
   download_exact(){
-    local rel="$1" out="$2" expected="$3" tmp="$out.tmp"
+    local rel="$1" out="$2" expected="$3" tmp
+    tmp="$out.tmp"
     if [[ -s "$out" && "$(wc -c < "$out")" == "$expected" ]]; then return 0; fi
     rm -f "$tmp"
     curl -fL --retry 4 --connect-timeout 20 "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/$HF_REV/$rel" -o "$tmp"
