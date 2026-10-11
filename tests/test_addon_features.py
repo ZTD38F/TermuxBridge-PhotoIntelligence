@@ -46,3 +46,54 @@ class AddonFeatureTests(unittest.TestCase):
             status=self.g.TOOLS['gallery_semantic_status'][1]({});self.assertFalse(status['available'])
             result=self.g.TOOLS['gallery_smart_search'][1]({'query':'black.jpg','limit':10});self.assertTrue(result['ok']);self.assertTrue(any(x['name']=='black.jpg' for x in result['items']))
         finally:gallery_semantic.available=original
+
+class SourceIsolationTests(AddonFeatureTests):
+    def _add_remote(self, size=4096):
+        with self.g._db() as c:
+            cur=c.execute("INSERT INTO images(path,name,album,size,mtime,seen,mime) VALUES(?,?,?,?,?,?,?)",
+                          ("shizuku:///storage/emulated/0/Android/data/demo/files/remote.jpg","remote.jpg","Android/data/demo",size,1234.0,1234.0,"image/jpeg"))
+            return int(cur.lastrowid)
+
+    def test_unavailable_shizuku_does_not_block_local_visual(self):
+        import gallery_shizuku
+        remote=self._add_remote(); original=gallery_shizuku.available_cached; gallery_shizuku.available_cached=lambda **_:False
+        try:
+            result=self.g.TOOLS['gallery_visual_index'][1]({'limit':20})
+            self.assertEqual(len(result['indexed_ids']),3)
+            self.assertIn('android_data_shizuku',result['deferred_sources'])
+            status=self.g.TOOLS['gallery_visual_status'][1]({})
+            self.assertEqual(status['local']['indexed'],3);self.assertEqual(status['android_data']['indexed'],0);self.assertEqual(status['android_data']['remaining'],1)
+        finally:gallery_shizuku.available_cached=original
+
+    def test_unavailable_shizuku_does_not_block_local_ocr(self):
+        import gallery_shizuku
+        self._add_remote(); original=gallery_shizuku.available_cached; gallery_shizuku.available_cached=lambda **_:False
+        try:
+            result=self.g.gallery_ocr_index({'languages':'eng','max_images':8,'max_seconds':30,'unrestricted':True})
+            self.assertGreater(len(result['recognized_ids']),0)
+            self.assertIsNone(result['paused']);self.assertIn('android_data_shizuku',result['deferred_sources']);self.assertEqual(result['shizuku_pending'],1)
+        finally:gallery_shizuku.available_cached=original
+
+    def test_unavailable_shizuku_does_not_block_local_semantic(self):
+        import gallery_shizuku
+        self._add_remote(); old_avail=gallery_shizuku.available_cached; old_model=gallery_semantic.available; old_embed=gallery_semantic.image_embedding
+        class FakeEmbedding:
+            def astype(self,*_):return self
+            def tobytes(self):return b'0'*2048
+        gallery_shizuku.available_cached=lambda **_:False;gallery_semantic.available=lambda:True;gallery_semantic.image_embedding=lambda _g,_row:FakeEmbedding()
+        try:
+            result=self.g.TOOLS['gallery_semantic_index'][1]({'limit':10})
+            self.assertEqual(len(result['indexed_ids']),3);self.assertIn('android_data_shizuku',result['deferred_sources'])
+            status=self.g.TOOLS['gallery_semantic_status'][1]({});self.assertEqual(status['local']['indexed'],3);self.assertEqual(status['android_data']['remaining'],1)
+        finally:
+            gallery_shizuku.available_cached=old_avail;gallery_semantic.available=old_model;gallery_semantic.image_embedding=old_embed
+
+    def test_unavailable_shizuku_does_not_block_local_duplicate_hashing(self):
+        import gallery_shizuku,shutil
+        source=self.g.SHARED_ROOT/'DCIM'/'Camera'/'black.jpg';copy=self.g.SHARED_ROOT/'copy-black.jpg';shutil.copy2(source,copy);self.g.gallery_scan({})
+        self._add_remote(size=source.stat().st_size); original=gallery_shizuku.available_cached;gallery_shizuku.available_cached=lambda **_:False
+        try:
+            result=self.g.TOOLS['gallery_duplicate_index'][1]({'limit':20,'max_megabytes':32})
+            self.assertGreaterEqual(len(result['indexed_ids']),2);self.assertIn('android_data_shizuku',result['deferred_sources'])
+            status=self.g.TOOLS['gallery_duplicate_status'][1]({});self.assertEqual(status['android_data']['remaining'],1);self.assertGreaterEqual(status['local']['indexed'],2)
+        finally:gallery_shizuku.available_cached=original

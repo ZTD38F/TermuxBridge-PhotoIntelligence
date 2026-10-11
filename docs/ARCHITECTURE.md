@@ -21,3 +21,7 @@ The database stores file metadata, OCR terminal state and FTS text, visual featu
 ## Compatibility
 
 The public `gallery_*` MCP tool family and `gallery://` virtual URLs are retained so existing ChatGPT workflows can continue after migration from the old in-core implementation.
+
+## Source isolation
+
+From v0.1.3, local shared-storage work and Shizuku-backed Android/data work use independent runnable queues. If Shizuku is sleeping or disconnected, only Android/data is deferred. Local OCR, visual features, CLIP embeddings and duplicate hashing continue. Existing Android/data catalog rows are preserved during scans while that source is unavailable and resume automatically when Shizuku returns.

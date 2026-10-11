@@ -93,11 +93,23 @@ def install(g: dict[str, Any]) -> None:
                FROM gallery_ocr_index o JOIN images i ON i.id=o.image_id
                WHERE i.size=o.size AND i.mtime=o.mtime
             """).fetchone()
+            image_total=c.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+            sh_total=c.execute("SELECT COUNT(*) FROM images WHERE path LIKE 'shizuku://%'").fetchone()[0]
+            sh_counts=c.execute("""SELECT COUNT(*) total,
+                 SUM(CASE WHEN o.error IS NULL THEN 1 ELSE 0 END) recognized,
+                 SUM(CASE WHEN o.error IS NOT NULL THEN 1 ELSE 0 END) failed
+                 FROM gallery_ocr_index o JOIN images i ON i.id=o.image_id
+                 WHERE i.size=o.size AND i.mtime=o.mtime AND i.path LIKE 'shizuku://%'""").fetchone()
         languages = ocr_languages()
+        terminal=int(counts["total"] or 0); sh_terminal=int(sh_counts["total"] or 0)
+        local_total=image_total-sh_total; local_terminal=terminal-sh_terminal
         return {**result, "engine": OCR_VERSION, "ocr_available": bool(languages),
                 "ocr_languages": languages, "ocr_indexed": int(counts["recognized"] or 0),
                 "ocr_failed": int(counts["failed"] or 0),
                 "ocr_backend": "tesseract-local" if languages else "not-installed",
+                "ocr_sources":{"local":{"total":local_total,"processed":local_terminal,"remaining":max(0,local_total-local_terminal)},
+                               "android_data":{"total":sh_total,"processed":sh_terminal,"remaining":max(0,sh_total-sh_terminal),
+                                               "available":gallery_shizuku.available_cached(ttl=30.0)}},
                 "semantic_embeddings": False}
 
     def _photo_row(image_id: int) -> sqlite3.Row:
@@ -167,6 +179,9 @@ def install(g: dict[str, Any]) -> None:
                 fcntl.flock(file_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return {"ok": False, "error": "OCR is already running"}
+            deferred_sources: set[str] = set()
+            shizuku_pending = 0
+            shizuku_available = True
             with db() as c:
                 _ensure(c)
                 if requested_ids:
@@ -174,12 +189,17 @@ def install(g: dict[str, Any]) -> None:
                     rows = [r for r in rows if r is not None]
                 else:
                     album = str(arguments.get("album", "")).strip()
+                    shizuku_available = gallery_shizuku.available_cached(ttl=30.0)
                     # Prefer screenshots for text search while handling all other image folders too.
-                    sql = """SELECT i.* FROM images i
+                    pending = "(o.image_id IS NULL OR o.size<>i.size OR o.mtime<>i.mtime OR o.languages<>?)"
+                    sql = f"""SELECT i.* FROM images i
                          LEFT JOIN gallery_ocr_index o ON o.image_id=i.id
-                         WHERE (o.image_id IS NULL OR o.size<>i.size OR o.mtime<>i.mtime OR o.languages<>?)
+                         WHERE {pending}
                          """
                     params: list[Any] = [languages]
+                    if not shizuku_available:
+                        sql += " AND i.path NOT LIKE 'shizuku://%'"
+                        deferred_sources.add("android_data_shizuku")
                     if album:
                         sql += " AND i.album=?"
                         params.append(album)
@@ -187,6 +207,15 @@ def install(g: dict[str, Any]) -> None:
                             " i.mtime DESC LIMIT ?")
                     params.append(cap)
                     rows = c.execute(sql, params).fetchall()
+                    if not shizuku_available:
+                        count_sql = f"""SELECT COUNT(*) FROM images i
+                            LEFT JOIN gallery_ocr_index o ON o.image_id=i.id
+                            WHERE {pending} AND i.path LIKE 'shizuku://%'"""
+                        count_params: list[Any] = [languages]
+                        if album:
+                            count_sql += " AND i.album=?"
+                            count_params.append(album)
+                        shizuku_pending = c.execute(count_sql, count_params).fetchone()[0]
             processed: list[int] = []
             skipped: list[int] = []
             failed: list[dict[str, Any]] = []
@@ -195,6 +224,8 @@ def install(g: dict[str, Any]) -> None:
             for row in rows[:cap]:
                 if time.monotonic()-start >= seconds - 2:
                     break
+                if "android_data_shizuku" in deferred_sources and gallery_shizuku.is_virtual(str(row["path"])):
+                    continue
                 current_power = battery_status()
                 temp = current_power.get("temperature_c")
                 current_charging = current_power.get("charging", False)
@@ -231,8 +262,12 @@ def install(g: dict[str, Any]) -> None:
                         """, (row["id"],row["size"],row["mtime"],languages,time.time(),len(text)))
                     processed.append(row["id"])
                 except gallery_shizuku.ShizukuUnavailable:
-                    paused = "SHIZUKU_UNAVAILABLE"
-                    break
+                    deferred_sources.add("android_data_shizuku")
+                    shizuku_available = False
+                    if requested_ids:
+                        paused = "SHIZUKU_UNAVAILABLE"
+                        break
+                    continue
                 except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired) as exc:
                     failed.append({"id":row["id"],"error":type(exc).__name__})
                     # Source might vanish mid-processing; if unchanged, mark failure
@@ -251,9 +286,13 @@ def install(g: dict[str, Any]) -> None:
                                       (row["id"],row["size"],row["mtime"],languages,time.time(),type(exc).__name__))
                     except (OSError,ValueError,gallery_shizuku.ShizukuUnavailable):
                         pass
+            if paused is None and not requested_ids and deferred_sources and not (processed or failed or skipped):
+                paused = "SHIZUKU_UNAVAILABLE"
             return {"ok":True,"recognized_ids":processed,"skipped_cached_ids":skipped,
                     "errors":failed,"paused":paused,"elapsed_seconds":round(time.monotonic()-start,2),
-                    "battery":battery,"model":"tesseract-local","source_photos_modified":False}
+                    "battery":battery,"model":"tesseract-local","source_photos_modified":False,
+                    "deferred_sources":sorted(deferred_sources),
+                    "shizuku_available":shizuku_available,"shizuku_pending":shizuku_pending}
 
     def text(args: dict[str, Any]) -> dict[str, Any]:
         image_id = int(args["id"])

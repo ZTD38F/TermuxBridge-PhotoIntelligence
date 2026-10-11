@@ -570,3 +570,5 @@ from gallery_smart_search import install as _install_photo_smart_search
 _install_photo_smart_search(globals())
 from gallery_duplicates import install as _install_photo_duplicates
 _install_photo_duplicates(globals())
+from gallery_sources import install as _install_photo_sources
+_install_photo_sources(globals())

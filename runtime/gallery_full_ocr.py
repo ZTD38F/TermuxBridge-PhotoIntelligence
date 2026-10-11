@@ -30,8 +30,11 @@ def snapshot():
 
 def write_status(result, state='RUNNING'):
     total,done,ok,failed=snapshot()
+    try: source_progress=g.gallery_ocr_status({}).get("ocr_sources",{})
+    except Exception: source_progress={}
     payload={"ok":True,"state":state,"total":total,"processed":done,"recognized":ok,"failed":failed,
              "remaining":max(0,total-done),"percent":round(done*100/total,2) if total else 100.0,
+             "sources":source_progress,"deferred_sources":result.get("deferred_sources",[]),
              "last_batch":result,"timestamp":time.time()}
     tmp=STATUS.with_name('.'+STATUS.name+'.tmp')
     tmp.write_text(json.dumps(payload,ensure_ascii=False)+'\n')

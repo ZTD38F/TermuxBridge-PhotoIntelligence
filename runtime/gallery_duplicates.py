@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib,time
 from collections import defaultdict
 from typing import Any
+import gallery_shizuku
 
 def install(g: dict[str,Any]) -> None:
     schema=g["_schema"];tools=g["TOOLS"];descriptions=g["DESCRIPTIONS"];readonly=g["READ_ONLY"];db=g["_db"]
@@ -17,20 +18,35 @@ def install(g: dict[str,Any]) -> None:
         return c.execute("SELECT COUNT(*) FROM images WHERE size IN (SELECT size FROM images GROUP BY size HAVING COUNT(*)>1)").fetchone()[0]
     def status(_):
         with db() as c:
-            ensure(c);cand=candidate_count(c)
+            ensure(c); cand=candidate_count(c)
+            sh_cand=c.execute("""SELECT COUNT(*) FROM images WHERE path LIKE 'shizuku://%' AND size IN
+              (SELECT size FROM images GROUP BY size HAVING COUNT(*)>1)""").fetchone()[0]
             done=c.execute("""SELECT COUNT(*) FROM gallery_duplicate_hash h JOIN images i ON i.id=h.image_id
               WHERE h.size=i.size AND h.mtime=i.mtime AND i.size IN (SELECT size FROM images GROUP BY size HAVING COUNT(*)>1)""").fetchone()[0]
-        return {"ok":True,"candidate_files":cand,"indexed":done,"remaining":max(0,cand-done),"percent":round(done*100/cand,2) if cand else 100.0}
+            sh_done=c.execute("""SELECT COUNT(*) FROM gallery_duplicate_hash h JOIN images i ON i.id=h.image_id
+              WHERE h.size=i.size AND h.mtime=i.mtime AND i.path LIKE 'shizuku://%' AND
+              i.size IN (SELECT size FROM images GROUP BY size HAVING COUNT(*)>1)""").fetchone()[0]
+        local_cand=cand-sh_cand; local_done=done-sh_done; sh_available=gallery_shizuku.available_cached(ttl=30.0)
+        return {"ok":True,"candidate_files":cand,"indexed":done,"remaining":max(0,cand-done),"percent":round(done*100/cand,2) if cand else 100.0,
+                "local":{"total":local_cand,"indexed":local_done,"remaining":max(0,local_cand-local_done)},
+                "android_data":{"total":sh_cand,"indexed":sh_done,"remaining":max(0,sh_cand-sh_done),"available":sh_available}}
     def index(args):
-        limit=max(1,min(int(args.get("limit",64)),512));max_bytes=max(1,int(args.get("max_megabytes",256)))*1048576
+        limit=max(1,min(int(args.get("limit",64)),512));max_bytes=max(1,int(args.get("max_megabytes",256)))*1048576; deferred=set()
+        shizuku_available=gallery_shizuku.available_cached(ttl=30.0)
         with db() as c:
-            ensure(c);rows=c.execute("""SELECT i.* FROM images i LEFT JOIN gallery_duplicate_hash h ON h.image_id=i.id
+            ensure(c)
+            sql="""SELECT i.* FROM images i LEFT JOIN gallery_duplicate_hash h ON h.image_id=i.id
               WHERE i.size IN (SELECT size FROM images GROUP BY size HAVING COUNT(*)>1)
-              AND (h.image_id IS NULL OR h.size<>i.size OR h.mtime<>i.mtime)
-              ORDER BY i.size ASC,i.id ASC LIMIT ?""",(limit,)).fetchall()
+              AND (h.image_id IS NULL OR h.size<>i.size OR h.mtime<>i.mtime)"""
+            params=[]
+            if not shizuku_available:
+                sql += " AND i.path NOT LIKE 'shizuku://%'"; deferred.add("android_data_shizuku")
+            sql += " ORDER BY i.size ASC,i.id ASC LIMIT ?"; params.append(limit)
+            rows=c.execute(sql,params).fetchall()
         ok=[];errors=[];used=0
         for row in rows:
             if used+int(row["size"])>max_bytes:break
+            if "android_data_shizuku" in deferred and gallery_shizuku.is_virtual(str(row["path"])): continue
             try:
                 h=hashlib.sha256()
                 with g["_materialize_row"](row) as p:
@@ -42,9 +58,12 @@ def install(g: dict[str,Any]) -> None:
                       VALUES(?,?,?,?,?,NULL) ON CONFLICT(image_id) DO UPDATE SET size=excluded.size,mtime=excluded.mtime,
                       processed_at=excluded.processed_at,sha256=excluded.sha256,error=NULL""",(row["id"],row["size"],row["mtime"],time.time(),digest))
                 ok.append(int(row["id"]))
+            except gallery_shizuku.ShizukuUnavailable:
+                deferred.add("android_data_shizuku"); shizuku_available=False
             except Exception as exc:
                 errors.append({"id":int(row["id"]),"error":type(exc).__name__})
-        return {"ok":True,"indexed_ids":ok,"errors":errors,"hashed_megabytes":round(used/1048576,2),"source_photos_modified":False}
+        return {"ok":True,"indexed_ids":ok,"errors":errors,"hashed_megabytes":round(used/1048576,2),"source_photos_modified":False,
+                "deferred_sources":sorted(deferred),"shizuku_available":shizuku_available}
     def exact_groups(args):
         limit=max(1,min(int(args.get("limit",100)),500))
         with db() as c:

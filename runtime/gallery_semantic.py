@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from photo_config import HOME
+import gallery_shizuku
 MODEL_ID="Xenova/clip-vit-base-patch32-quantized"
 MODEL_DIR=HOME/"models"/"clip-vit-base-patch32"
 VISION=MODEL_DIR/"vision_model_quantized.onnx"; TEXT=MODEL_DIR/"text_model_quantized.onnx"; VOCAB=MODEL_DIR/"vocab.json"; MERGES=MODEL_DIR/"merges.txt"
@@ -117,24 +118,44 @@ def install(g: dict[str,Any]) -> None:
         c.execute("""CREATE TABLE IF NOT EXISTS gallery_semantic(image_id INTEGER PRIMARY KEY,size INTEGER NOT NULL,mtime REAL NOT NULL,model TEXT NOT NULL,processed_at REAL NOT NULL,embedding BLOB,error TEXT,FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE)""")
     def status(_):
         with db() as c:
-            ensure(c);total=c.execute("SELECT COUNT(*) FROM images").fetchone()[0];done=c.execute("SELECT COUNT(*) FROM gallery_semantic s JOIN images i ON i.id=s.image_id WHERE s.size=i.size AND s.mtime=i.mtime AND s.model=?",(MODEL_ID,)).fetchone()[0]
-        return {"ok":True,"available":available(),"model":MODEL_ID,"total":total,"indexed":done,"remaining":max(0,total-done),"percent":round(done*100/total,2) if total else 100.0}
+            ensure(c)
+            total=c.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+            sh_total=c.execute("SELECT COUNT(*) FROM images WHERE path LIKE 'shizuku://%'").fetchone()[0]
+            done=c.execute("SELECT COUNT(*) FROM gallery_semantic s JOIN images i ON i.id=s.image_id WHERE s.size=i.size AND s.mtime=i.mtime AND s.model=?",(MODEL_ID,)).fetchone()[0]
+            sh_done=c.execute("SELECT COUNT(*) FROM gallery_semantic s JOIN images i ON i.id=s.image_id WHERE s.size=i.size AND s.mtime=i.mtime AND s.model=? AND i.path LIKE 'shizuku://%'",(MODEL_ID,)).fetchone()[0]
+        local_total=total-sh_total; local_done=done-sh_done; sh_available=gallery_shizuku.available_cached(ttl=30.0)
+        return {"ok":True,"available":available(),"model":MODEL_ID,"total":total,"indexed":done,"remaining":max(0,total-done),"percent":round(done*100/total,2) if total else 100.0,
+                "local":{"total":local_total,"indexed":local_done,"remaining":max(0,local_total-local_done)},
+                "android_data":{"total":sh_total,"indexed":sh_done,"remaining":max(0,sh_total-sh_done),"available":sh_available}}
     def index(args):
         if not available():return {"ok":False,"error":"semantic model unavailable","model":MODEL_ID}
-        limit=max(1,min(int(args.get("limit",4)),32)); ids=args.get("ids")
+        limit=max(1,min(int(args.get("limit",4)),32)); ids=args.get("ids"); deferred=set()
+        shizuku_available=True if ids else gallery_shizuku.available_cached(ttl=30.0)
         with db() as c:
             ensure(c)
-            if ids:rows=[c.execute("SELECT * FROM images WHERE id=?",(int(i),)).fetchone() for i in ids[:32]];rows=[r for r in rows if r]
-            else:rows=c.execute("""SELECT i.* FROM images i LEFT JOIN gallery_semantic s ON s.image_id=i.id WHERE s.image_id IS NULL OR s.size<>i.size OR s.mtime<>i.mtime OR s.model<>? ORDER BY i.mtime DESC LIMIT ?""",(MODEL_ID,limit)).fetchall()
+            if ids:
+                rows=[c.execute("SELECT * FROM images WHERE id=?",(int(i),)).fetchone() for i in ids[:32]];rows=[r for r in rows if r]
+            else:
+                sql="""SELECT i.* FROM images i LEFT JOIN gallery_semantic s ON s.image_id=i.id
+                       WHERE (s.image_id IS NULL OR s.size<>i.size OR s.mtime<>i.mtime OR s.model<>?)"""
+                params=[MODEL_ID]
+                if not shizuku_available:
+                    sql += " AND i.path NOT LIKE 'shizuku://%'"; deferred.add("android_data_shizuku")
+                sql += " ORDER BY i.mtime DESC LIMIT ?"; params.append(limit)
+                rows=c.execute(sql,params).fetchall()
         ok=[];errors=[]
         for row in rows:
+            if "android_data_shizuku" in deferred and gallery_shizuku.is_virtual(str(row["path"])): continue
             try:
-                emb=image_embedding(g,row)
+                emb=image_embedding(g,row); g["_validate_row"](row)
                 with db() as c:
                     ensure(c);c.execute("""INSERT INTO gallery_semantic(image_id,size,mtime,model,processed_at,embedding,error) VALUES(?,?,?,?,?,?,NULL) ON CONFLICT(image_id) DO UPDATE SET size=excluded.size,mtime=excluded.mtime,model=excluded.model,processed_at=excluded.processed_at,embedding=excluded.embedding,error=NULL""",(row["id"],row["size"],row["mtime"],MODEL_ID,time.time(),emb.astype("float32").tobytes()))
                 ok.append(int(row["id"]))
+            except gallery_shizuku.ShizukuUnavailable:
+                deferred.add("android_data_shizuku"); shizuku_available=False
             except Exception as exc:errors.append({"id":int(row["id"]),"error":type(exc).__name__})
-        return {"ok":True,"indexed_ids":ok,"errors":errors,"model":MODEL_ID,"source_photos_modified":False}
+        return {"ok":True,"indexed_ids":ok,"errors":errors,"model":MODEL_ID,"source_photos_modified":False,
+                "deferred_sources":sorted(deferred),"shizuku_available":shizuku_available}
     def search(args):
         if not available():return {"ok":False,"error":"semantic model unavailable","items":[]}
         query=str(args.get("query","")).strip()
