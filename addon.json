@@ -1,7 +1,7 @@
 {
   "name": "photo-intelligence",
   "display_name": "TermuxBridge Photo Intelligence",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "abi": 1,
   "bridge_major": 1,
   "bridge_min_version": "1.2.31",
