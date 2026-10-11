@@ -20,10 +20,12 @@ def _full_status():
     except Exception:return {"state":"NOT_STARTED"}
 
 def status():
-    base=g.gallery_status({}); ocr=g.gallery_ocr_status({}); visual=g.TOOLS["gallery_visual_status"][1]({}); semantic=g.TOOLS["gallery_semantic_status"][1]({}); duplicates=g.TOOLS["gallery_duplicate_status"][1]({})
-    with g._db() as c:
-        sh=c.execute("SELECT COUNT(*) FROM images WHERE path LIKE 'shizuku://%'").fetchone()[0]
-    return {"ok":True,"library":{"total":base.get("indexed",0),"shizuku":sh},"ocr":ocr,"visual":visual,"semantic":semantic,"duplicates":duplicates,"full":_full_status(),"db_integrity":base.get("db_integrity"),"free_storage_gib":base.get("free_storage_gib")}
+    base=g.gallery_status({}); ocr=g.gallery_ocr_status({}); visual=g.TOOLS["gallery_visual_status"][1]({}); semantic=g.TOOLS["gallery_semantic_status"][1]({}); duplicates=g.TOOLS["gallery_duplicate_status"][1]({}); sources=g.TOOLS["gallery_source_status"][1]({})
+    analysis_path=STATE_DIR/"analysis_worker_status.json"
+    try: analysis=json.loads(analysis_path.read_text())
+    except Exception: analysis={"state":"NOT_STARTED"}
+    sh=sources.get("sources",{}).get("android_data_shizuku",{}).get("indexed",0)
+    return {"ok":True,"library":{"total":base.get("indexed",0),"shizuku":sh},"sources":sources,"ocr":ocr,"visual":visual,"semantic":semantic,"duplicates":duplicates,"analysis":analysis,"full":_full_status(),"db_integrity":base.get("db_integrity"),"free_storage_gib":base.get("free_storage_gib")}
 
 class Handler(BaseHTTPRequestHandler):
     server_version="PhotoIntelligence/0.1"

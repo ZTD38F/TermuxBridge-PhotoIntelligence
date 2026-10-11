@@ -10,3 +10,5 @@
 - Exact duplicates require SHA-256 equality. Near duplicates are explicitly labeled as visual similarity, not byte identity.
 - TermuxBridge addon loading checks ownership, path containment, ABI, namespace and writable permission bits.
 - `/data/data` is not claimed as accessible without root.
+
+- Source isolation prevents a temporary Shizuku outage from blocking or corrupting normal shared-storage indexing. Android/data rows are preserved and marked deferred until the source returns.

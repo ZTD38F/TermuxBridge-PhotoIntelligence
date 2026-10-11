@@ -4,7 +4,8 @@ Author: @dvkrum
 from __future__ import annotations
 import math, statistics, time
 from typing import Any
-VERSION = "0.1.0"
+import gallery_shizuku
+VERSION = "0.1.1"
 
 def install(g: dict[str, Any]) -> None:
     schema=g["_schema"]; tools=g["TOOLS"]; descriptions=g["DESCRIPTIONS"]; readonly=g["READ_ONLY"]; db=g["_db"]
@@ -57,19 +58,25 @@ def install(g: dict[str, Any]) -> None:
                         "entropy":round(entropy,3),"dominant_color":color_name(rgb),"screenshot_score":min(1.0,round(score,2)),
                         "width":width,"height":height,"dhash":f"{bits:016x}"}
     def visual_index(args):
-        limit=max(1,min(int(args.get("limit",64)),256)); ids=args.get("ids")
+        limit=max(1,min(int(args.get("limit",64)),256)); ids=args.get("ids"); deferred=set()
+        shizuku_available=True if ids else gallery_shizuku.available_cached(ttl=30.0)
         with db() as c:
             ensure(c)
             if ids:
                 rows=[c.execute("SELECT * FROM images WHERE id=?",(int(i),)).fetchone() for i in ids[:64]]; rows=[r for r in rows if r]
             else:
-                rows=c.execute("""SELECT i.* FROM images i LEFT JOIN gallery_visual_features v ON v.image_id=i.id
-                  WHERE v.image_id IS NULL OR v.size<>i.size OR v.mtime<>i.mtime ORDER BY i.mtime DESC LIMIT ?""",(limit,)).fetchall()
+                sql="""SELECT i.* FROM images i LEFT JOIN gallery_visual_features v ON v.image_id=i.id
+                  WHERE (v.image_id IS NULL OR v.size<>i.size OR v.mtime<>i.mtime)"""
+                params=[]
+                if not shizuku_available:
+                    sql += " AND i.path NOT LIKE 'shizuku://%'"; deferred.add("android_data_shizuku")
+                sql += " ORDER BY i.mtime DESC LIMIT ?"; params.append(limit)
+                rows=c.execute(sql,params).fetchall()
         ok=[]; errors=[]
         for row in rows:
+            if "android_data_shizuku" in deferred and gallery_shizuku.is_virtual(str(row["path"])): continue
             try:
-                v=metrics(row)
-                g["_validate_row"](row)
+                v=metrics(row); g["_validate_row"](row)
                 with db() as c:
                     ensure(c)
                     c.execute("""INSERT INTO gallery_visual_features(image_id,size,mtime,processed_at,brightness,contrast,sharpness,entropy,dominant_color,screenshot_score,width,height,dhash,error)
@@ -78,14 +85,22 @@ def install(g: dict[str, Any]) -> None:
                       screenshot_score=excluded.screenshot_score,width=excluded.width,height=excluded.height,dhash=excluded.dhash,error=NULL""",
                       (row["id"],row["size"],row["mtime"],time.time(),v["brightness"],v["contrast"],v["sharpness"],v["entropy"],v["dominant_color"],v["screenshot_score"],v["width"],v["height"],v["dhash"]))
                 ok.append(int(row["id"]))
+            except gallery_shizuku.ShizukuUnavailable:
+                deferred.add("android_data_shizuku"); shizuku_available=False
             except Exception as exc:
                 errors.append({"id":int(row["id"]),"error":type(exc).__name__})
-        return {"ok":True,"indexed_ids":ok,"errors":errors,"engine":VERSION,"source_photos_modified":False}
+        return {"ok":True,"indexed_ids":ok,"errors":errors,"engine":VERSION,"source_photos_modified":False,
+                "deferred_sources":sorted(deferred),"shizuku_available":shizuku_available}
     def visual_status(_):
         with db() as c:
             ensure(c); total=c.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+            sh_total=c.execute("SELECT COUNT(*) FROM images WHERE path LIKE 'shizuku://%'").fetchone()[0]
             done=c.execute("SELECT COUNT(*) FROM gallery_visual_features v JOIN images i ON i.id=v.image_id WHERE v.size=i.size AND v.mtime=i.mtime").fetchone()[0]
+            sh_done=c.execute("SELECT COUNT(*) FROM gallery_visual_features v JOIN images i ON i.id=v.image_id WHERE v.size=i.size AND v.mtime=i.mtime AND i.path LIKE 'shizuku://%'").fetchone()[0]
+        local_total=total-sh_total; local_done=done-sh_done
         return {"ok":True,"total":total,"indexed":done,"remaining":max(0,total-done),"percent":round(done*100/total,2) if total else 100.0,
+                "local":{"total":local_total,"indexed":local_done,"remaining":max(0,local_total-local_done)},
+                "android_data":{"total":sh_total,"indexed":sh_done,"remaining":max(0,sh_total-sh_done),"available":gallery_shizuku.available_cached(ttl=30.0)},
                 "engine":VERSION,"semantic_backend":"not_configured"}
     def visual_search(args):
         color=str(args.get("color","")).strip().lower(); screenshot=args.get("screenshot"); limit=max(1,min(int(args.get("limit",100)),500))
@@ -100,5 +115,5 @@ def install(g: dict[str, Any]) -> None:
     tools["gallery_visual_index"]=(schema({"ids":{"type":"array","items":{"type":"integer","minimum":1},"maxItems":64},"limit":{"type":"integer","minimum":1,"maximum":256,"default":64}}),visual_index)
     tools["gallery_visual_status"]=(schema(),visual_status)
     tools["gallery_visual_search"]=(schema({"color":{"type":"string"},"screenshot":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":500,"default":100}}),visual_search)
-    descriptions.update({"gallery_visual_index":"Build local visual and quality features without cloud calls.","gallery_visual_status":"Read visual feature coverage.","gallery_visual_search":"Search indexed visual features such as dominant color and screenshot likelihood."})
+    descriptions.update({"gallery_visual_index":"Build local visual and quality features without cloud calls.","gallery_visual_status":"Read visual feature coverage by source.","gallery_visual_search":"Search indexed visual features such as dominant color and screenshot likelihood."})
     readonly.update({"gallery_visual_status","gallery_visual_search"})

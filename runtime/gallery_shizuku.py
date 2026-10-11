@@ -21,6 +21,9 @@ PREFIX = "shizuku://"
 ANDROID_DATA = "/storage/emulated/0/Android/data"
 RISH = Path(os.environ.get("PHOTO_INTELLIGENCE_RISH", str(Path.home() / "bin" / "rish")))
 EXCHANGE_PREFIX = "exchange-"
+_AVAILABILITY_CHECKED_AT = 0.0
+_AVAILABILITY_VALUE = False
+
 
 def is_virtual(value: str) -> bool:
     return str(value).startswith(PREFIX)
@@ -85,12 +88,25 @@ def _remote_output(command: str, *, timeout: float = 60, attempts: int = 3) -> b
             time.sleep(0.35)
     raise ShizukuUnavailable("Shizuku exchange failed") from last
 
-def available() -> bool:
+def available_cached(*, ttl: float = 30.0, force: bool = False, timeout: float = 3.0) -> bool:
+    global _AVAILABILITY_CHECKED_AT, _AVAILABILITY_VALUE
+    now = time.monotonic()
+    if not force and _AVAILABILITY_CHECKED_AT and now - _AVAILABILITY_CHECKED_AT < ttl:
+        return _AVAILABILITY_VALUE
     try:
-        p = _run(f"test -d {shlex.quote(ANDROID_DATA)}", timeout=8)
-        return p.returncode == 0
+        p = _run(f"test -d {shlex.quote(ANDROID_DATA)}", timeout=max(0.5, float(timeout)))
+        value = p.returncode == 0
     except (OSError, subprocess.SubprocessError, RuntimeError):
-        return False
+        value = False
+    _AVAILABILITY_CHECKED_AT = now
+    _AVAILABILITY_VALUE = value
+    return value
+
+def available() -> bool:
+    return available_cached(ttl=0.0, force=True, timeout=8.0)
+
+def source_available(value: str, *, ttl: float = 30.0) -> bool:
+    return not is_virtual(value) or available_cached(ttl=ttl)
 
 def enumerate_images(exts: Iterable[str], *, timeout: float = 120) -> list[tuple[str,int,float]]:
     exts = sorted({x.lower().lstrip(".") for x in exts if x})
@@ -157,7 +173,7 @@ def materialize(value: str, expected_size: int, expected_mtime: float, state_dir
                         pass
             if attempt == 0:
                 time.sleep(0.35)
-        if not available():
+        if not available_cached(ttl=0.0, force=True, timeout=3.0):
             raise ShizukuUnavailable("Shizuku service unavailable") from last
         raise ValueError("Shizuku read failed") from last
     finally:

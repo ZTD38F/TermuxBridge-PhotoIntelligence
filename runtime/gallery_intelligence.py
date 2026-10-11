@@ -123,23 +123,31 @@ def install(g: dict[str, Any]) -> None:
                         err(exc)
 
             shizuku_count = 0
+            shizuku_deferred = False
             if root == Path("/storage/emulated/0").resolve():
-                try:
-                    for absolute, size, mtime in gallery_shizuku.enumerate_images(image_exts):
-                        virtual = gallery_shizuku.to_virtual(absolute)
-                        relative = absolute[len("/storage/emulated/0/"):]
-                        p = Path(absolute)
-                        album = str(Path(relative).parent)
-                        candidates.append((virtual, p.name, album, int(size), float(mtime), stamp,
-                                           g["MIME_BY_EXT"].get(p.suffix.lower())))
-                        shizuku_count += 1
-                except Exception as exc:
-                    err(OSError(type(exc).__name__))
+                if gallery_shizuku.available_cached(ttl=30.0):
+                    try:
+                        for absolute, size, mtime in gallery_shizuku.enumerate_images(image_exts):
+                            virtual = gallery_shizuku.to_virtual(absolute)
+                            relative = absolute[len("/storage/emulated/0/"):]
+                            p = Path(absolute)
+                            album = str(Path(relative).parent)
+                            candidates.append((virtual, p.name, album, int(size), float(mtime), stamp,
+                                               g["MIME_BY_EXT"].get(p.suffix.lower())))
+                            shizuku_count += 1
+                    except gallery_shizuku.ShizukuUnavailable:
+                        shizuku_deferred = True
+                else:
+                    shizuku_deferred = True
             with db() as c:
                 old = c.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-            if not candidates or (old >= 100 and len(candidates) < old * 0.6):
+                expected_old = (c.execute("SELECT COUNT(*) FROM images WHERE path NOT LIKE 'shizuku://%'").fetchone()[0]
+                                if shizuku_deferred else old)
+            found_expected = sum(1 for item in candidates if not str(item[0]).startswith("shizuku://")) if shizuku_deferred else len(candidates)
+            if not candidates or (expected_old >= 100 and found_expected < expected_old * 0.6):
                 return {"ok": False, "error": "scan unexpectedly incomplete; index preserved",
-                        "found": len(candidates), "previous": old, "read_errors": len(errors)}
+                        "found": len(candidates), "previous": old, "read_errors": len(errors),
+                        "deferred_sources": ["android_data_shizuku"] if shizuku_deferred else []}
             removed = 0
             with db() as c:
                 _extras(c)
@@ -155,7 +163,10 @@ def install(g: dict[str, Any]) -> None:
                                   THEN NULL ELSE images.height END
                 """, candidates)
                 if not errors:
-                    removed = c.execute("DELETE FROM images WHERE seen<>?", (stamp,)).rowcount
+                    if shizuku_deferred:
+                        removed = c.execute("DELETE FROM images WHERE seen<>? AND path NOT LIKE 'shizuku://%'", (stamp,)).rowcount
+                    else:
+                        removed = c.execute("DELETE FROM images WHERE seen<>?", (stamp,)).rowcount
                     c.execute("DELETE FROM gallery_extra WHERE image_id NOT IN (SELECT id FROM images)")
                 c.execute("INSERT INTO meta(key,value) VALUES('last_scan',?) "
                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(time.time()),))
@@ -166,9 +177,10 @@ def install(g: dict[str, Any]) -> None:
                 total = c.execute("SELECT COUNT(*) FROM images").fetchone()[0]
             return {"ok": True, "indexed": total, "scanned": len(candidates),
                     "removed_missing": removed, "read_errors": len(errors),
-                    "partial": bool(errors), "pruned": not errors,
+                    "partial": bool(errors or shizuku_deferred), "pruned": not errors,
                     "seconds": round(time.time()-start,2), "photos_modified": False, "engine": VERSION,
-                    "shizuku_android_data_images": shizuku_count}
+                    "shizuku_android_data_images": shizuku_count,
+                    "deferred_sources": ["android_data_shizuku"] if shizuku_deferred else []}
 
     def _row(photo_id: int) -> sqlite3.Row:
         with db() as c:
