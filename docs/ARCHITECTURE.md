@@ -25,3 +25,7 @@ The public `gallery_*` MCP tool family and `gallery://` virtual URLs are retaine
 ## Source isolation
 
 From v0.1.3, local shared-storage work and Shizuku-backed Android/data work use independent runnable queues. If Shizuku is sleeping or disconnected, only Android/data is deferred. Local OCR, visual features, CLIP embeddings and duplicate hashing continue. Existing Android/data catalog rows are preserved during scans while that source is unavailable and resume automatically when Shizuku returns.
+
+## Release transition cleanup
+
+From v0.1.4, the one-click installer runs a scoped stale-worker reaper after the normal addon shutdown and before restart. It identifies only Photo Intelligence processes under the addon root and current Termux UID, tries SIGTERM first, then applies a bounded force-stop only after revalidating the same PID/start identity. This prevents orphan workers from an older release from holding advisory locks after an update.
