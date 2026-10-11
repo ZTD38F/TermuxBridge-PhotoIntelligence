@@ -12,7 +12,7 @@ import json,os,signal,time,sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/"runtime"))
 from photo_config import HOME,STATE_DIR,ensure_dirs
-TARGETS={"service.py","gallery_worker.py","gallery_full_ocr.py","analysis_worker.py","dashboard_server.py","gallery_maintenance.py"}
+TARGETS={"service.py","gallery_worker.py","gallery_full_ocr.py","analysis_worker.py","dashboard_server.py","gallery_maintenance.py","pipeline_scheduler.py","source_watcher.py"}
 
 def inspect(pid:int):
     p=Path('/proc')/str(pid)

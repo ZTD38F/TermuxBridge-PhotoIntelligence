@@ -572,3 +572,9 @@ from gallery_duplicates import install as _install_photo_duplicates
 _install_photo_duplicates(globals())
 from gallery_sources import install as _install_photo_sources
 _install_photo_sources(globals())
+from gallery_pipeline import install as _install_photo_pipeline
+_install_photo_pipeline(globals())
+
+# Versioned schema migration runs after all engine tables are installed.
+from db_migrations import migrate as _migrate_photo_database
+DATABASE_MIGRATION = _migrate_photo_database(DB_PATH)
