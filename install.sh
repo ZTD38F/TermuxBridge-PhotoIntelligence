@@ -55,7 +55,7 @@ if [[ ! -d "$DEST" ]]; then
   cp -a "$SRC" "$DEST.tmp"
   mv "$DEST.tmp" "$DEST"
 fi
-chmod +x "$DEST/install.sh" "$DEST/photo-intelligence" "$DEST/service.py" "$DEST/scripts/migrate_legacy.py" "$DEST/scripts/takeover_legacy.py"
+chmod +x "$DEST/install.sh" "$DEST/photo-intelligence" "$DEST/service.py" "$DEST/scripts/migrate_legacy.py" "$DEST/scripts/takeover_legacy.py" "$DEST/scripts/reap_stale_workers.py"
 
 if [[ "${PHOTO_INTELLIGENCE_SKIP_SEMANTIC_MODEL:-0}" != "1" ]]; then
   say "Installing local CLIP semantic model (~154 MB)..."
@@ -110,6 +110,7 @@ python -c 'import json,os,sys,time;from pathlib import Path;root=Path(sys.argv[1
 if [[ "${PHOTO_INTELLIGENCE_DEFER_START:-0}" != "1" ]]; then
   say "Reloading TermuxBridge so ChatGPT discovers the addon..."
   bash "$BRIDGE_ROOT/stop_bridge.sh" >/dev/null 2>&1 || true
+  PHOTO_INTELLIGENCE_HOME="$ADDON_ROOT" PHOTO_INTELLIGENCE_CURRENT="$ADDON_ROOT/current" python "$ADDON_ROOT/current/scripts/reap_stale_workers.py"
   bash "$BRIDGE_ROOT/start_bridge.sh" >/dev/null
   for _ in $(seq 1 20); do
     curl -fsS --max-time 2 http://127.0.0.1:18780/api/status >/dev/null 2>&1 && break
