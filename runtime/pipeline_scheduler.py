@@ -8,6 +8,7 @@ never loses completed work.
 """
 from __future__ import annotations
 import fcntl,json,os,signal,subprocess,time
+from concurrent.futures import ThreadPoolExecutor,TimeoutError as FutureTimeout
 from pathlib import Path
 import gallery_bridge_tools as g
 from photo_config import STATE_DIR,ensure_dirs
@@ -55,12 +56,26 @@ def summarize(result):
         if isinstance(value,list):out[dst]=len(value)
     return out
 
-def run_stage(name,fn,metrics):
-    started=time.monotonic()
+def _heartbeat(stage,cfg,b):
+    current=read_json(STATUS,{})
+    current.update({"ok":True,"state":"RUNNING","phase":stage,"profile":cfg.get("profile","balanced"),"pid":os.getpid(),"battery":b,"timestamp":time.time()})
+    atomic(STATUS,current)
+
+def run_stage(name,fn,metrics,cfg,b):
+    started=time.monotonic();result=None
+    executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix="photo-"+name)
+    future=executor.submit(fn)
     try:
-        result=fn();ok=bool(result.get("ok",False)) if isinstance(result,dict) else False
+        while True:
+            try:
+                result=future.result(timeout=5.0);break
+            except FutureTimeout:
+                _heartbeat(name,cfg,b)
+        ok=bool(result.get("ok",False)) if isinstance(result,dict) else False
     except Exception as exc:
         result={"ok":False,"error":type(exc).__name__};ok=False
+    finally:
+        executor.shutdown(wait=True,cancel_futures=False)
     elapsed=round(time.monotonic()-started,3)
     bucket=metrics.setdefault("stages",{}).setdefault(name,{"runs":0,"success":0,"failures":0,"seconds":0.0})
     bucket["runs"]+=1;bucket["success" if ok else "failures"]+=1;bucket["seconds"]=round(float(bucket.get("seconds",0.0))+elapsed,3);bucket["last_at"]=time.time();bucket["last_ok"]=ok;bucket["last_seconds"]=elapsed
@@ -86,20 +101,20 @@ def main():
                 cycle_start=time.monotonic();cfg=effective();b=battery();allowed,pause_reason=power_allowed(cfg,b);last={};work=False
                 base=g.gallery_status({});scan_needed,scan_reason=due_scan(cfg,base.get("last_scan"))
                 if scan_needed:
-                    result,_=run_stage("scan",lambda:g.gallery_scan({}),metrics);last["scan"]={**summarize(result),"reason":scan_reason};work=True
+                    result,_=run_stage("scan",lambda:g.gallery_scan({}),metrics,cfg,b);last["scan"]={**summarize(result),"reason":scan_reason};work=True
                     if result.get("ok"):
                         try:DIRTY.unlink()
                         except FileNotFoundError:pass
                 # Metadata scan is always allowed. Heavy stages honor the selected public profile.
                 if allowed:
                     if cfg.get("auto_ocr",True):
-                        result,_=run_stage("ocr",lambda:g.gallery_ocr_index({"max_images":int(cfg["ocr_images"]),"max_seconds":int(cfg["ocr_seconds"]),"languages":cfg["languages"],"allow_on_battery":True,"unrestricted":True}),metrics);last["ocr"]=summarize(result);work=work or bool(result.get("recognized_ids") or result.get("errors"))
+                        result,_=run_stage("ocr",lambda:g.gallery_ocr_index({"max_images":int(cfg["ocr_images"]),"max_seconds":int(cfg["ocr_seconds"]),"languages":cfg["languages"],"allow_on_battery":True,"unrestricted":True}),metrics,cfg,b);last["ocr"]=summarize(result);work=work or bool(result.get("recognized_ids") or result.get("errors"))
                     if cfg.get("auto_visual",True):
-                        result,_=run_stage("visual",lambda:g.TOOLS["gallery_visual_index"][1]({"limit":int(cfg["visual_images"])}),metrics);last["visual"]=summarize(result);work=work or bool(result.get("indexed_ids"))
+                        result,_=run_stage("visual",lambda:g.TOOLS["gallery_visual_index"][1]({"limit":int(cfg["visual_images"])}),metrics,cfg,b);last["visual"]=summarize(result);work=work or bool(result.get("indexed_ids"))
                     if cfg.get("auto_duplicates",True):
-                        result,_=run_stage("duplicates",lambda:g.TOOLS["gallery_duplicate_index"][1]({"limit":int(cfg["duplicate_images"]),"max_megabytes":int(cfg["duplicate_mb"])}),metrics);last["duplicates"]=summarize(result);work=work or bool(result.get("indexed_ids"))
+                        result,_=run_stage("duplicates",lambda:g.TOOLS["gallery_duplicate_index"][1]({"limit":int(cfg["duplicate_images"]),"max_megabytes":int(cfg["duplicate_mb"])}),metrics,cfg,b);last["duplicates"]=summarize(result);work=work or bool(result.get("indexed_ids"))
                     if cfg.get("auto_semantic",True):
-                        result,_=run_stage("semantic",lambda:g.TOOLS["gallery_semantic_index"][1]({"limit":int(cfg["semantic_images"])}),metrics);last["semantic"]=summarize(result);work=work or bool(result.get("indexed_ids"))
+                        result,_=run_stage("semantic",lambda:g.TOOLS["gallery_semantic_index"][1]({"limit":int(cfg["semantic_images"])}),metrics,cfg,b);last["semantic"]=summarize(result);work=work or bool(result.get("indexed_ids"))
                 cov=coverage();deferred=cov["sources"].get("deferred_sources",[]);all_done=(cov["ocr"]["remaining"]==0 and int(cov["visual"].get("remaining",0))==0 and int(cov["semantic"].get("remaining",0))==0 and int(cov["duplicates"].get("remaining",0))==0)
                 if not allowed:state="POWER_PAUSED"
                 elif all_done:state="COMPLETE"
@@ -107,7 +122,7 @@ def main():
                 elif deferred:state="DEFERRED_SOURCE"
                 else:state="IDLE"
                 metrics["cycles"]=int(metrics.get("cycles",0))+1;metrics["last_cycle_seconds"]=round(time.monotonic()-cycle_start,3);metrics["last_cycle_at"]=time.time();atomic(METRICS,metrics)
-                payload={"ok":True,"state":state,"profile":cfg["profile"],"pid":os.getpid(),"battery":b,"power_pause_reason":pause_reason,"coverage":cov,"last":last,"cycle_seconds":metrics["last_cycle_seconds"],"dirty":DIRTY.exists(),"timestamp":time.time()};atomic(STATUS,payload)
+                payload={"ok":True,"state":state,"phase":None,"profile":cfg["profile"],"pid":os.getpid(),"battery":b,"power_pause_reason":pause_reason,"coverage":cov,"last":last,"cycle_seconds":metrics["last_cycle_seconds"],"dirty":DIRTY.exists(),"timestamp":time.time()};atomic(STATUS,payload)
                 write_legacy_ocr(cov,last.get("ocr",{}),"COMPLETE" if cov["ocr"]["remaining"]==0 else ("PAUSED" if not allowed else "RUNNING"))
                 delay=float(cfg["busy_sleep"] if work else cfg["idle_sleep"]);end=time.monotonic()+delay
                 while not STOP and time.monotonic()<end:time.sleep(min(.2,max(0,end-time.monotonic())))
