@@ -17,6 +17,12 @@ class ReleaseIntegrityTests(unittest.TestCase):
         self.assertIn('--target "$GITHUB_SHA"', workflow)
         self.assertNotIn("--clobber", workflow)
         self.assertNotIn("gh release upload", workflow)
+        self.assertIn("Validate exact release commit", workflow)
+        self.assertIn("python -m unittest discover -s tests -v", workflow)
+        self.assertLess(workflow.index("Validate exact release commit"),
+                        workflow.index("Build release"))
+        self.assertLess(workflow.index("Build release"),
+                        workflow.index("Publish"))
 
     def test_current_tag_requires_version_bump(self):
         # A previous tag must never be republished with modified contents.
