@@ -1,0 +1,38 @@
+name: Release
+on:
+  push:
+    branches: [stable]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build release
+        run: |
+          set -euo pipefail
+          VERSION="$(python -c 'import json;print(json.load(open("addon.json"))["version"])')"
+          TAG="v$VERSION"
+          mkdir -p dist/package
+          rsync -a --exclude .git --exclude dist ./ dist/package/
+          tar -C dist/package -czf "dist/TermuxBridge-PhotoIntelligence-$TAG.tar.gz" .
+          (cd dist && sha256sum "TermuxBridge-PhotoIntelligence-$TAG.tar.gz" > SHA256SUMS.txt)
+          python - <<PY
+          import json
+          from pathlib import Path
+          d=json.loads(Path('addon.json').read_text())
+          Path('dist/addon-release.json').write_text(json.dumps({'name':d['name'],'version':d['version'],'abi':d['abi'],'bridge_min_version':d['bridge_min_version'],'commit':'${{ github.sha }}'},indent=2)+'\n')
+          PY
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/addon-release.json dist/SHA256SUMS.txt dist/TermuxBridge-PhotoIntelligence-"$TAG".tar.gz --clobber
+          else
+            gh release create "$TAG" dist/addon-release.json dist/SHA256SUMS.txt dist/TermuxBridge-PhotoIntelligence-"$TAG".tar.gz --title "$TAG" --generate-notes
+          fi

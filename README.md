@@ -1,0 +1,71 @@
+# TermuxBridge Photo Intelligence
+
+Local-first Android photo intelligence addon for **TermuxBridge**. It builds a persistent local memory of the photo library so ChatGPT can find and inspect photos quickly without re-reading the entire library on every request.
+
+**Author:** `@dvkrum`
+
+## Install
+
+Prerequisite: TermuxBridge 1.2.31+ must already be installed and connected to ChatGPT.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ZTD38F/TermuxBridge-PhotoIntelligence/stable/install.sh | bash
+```
+
+The installer updates an older TermuxBridge when possible, installs local dependencies, OCR languages and the quantized CLIP model, imports an existing legacy photo index if present, registers the addon, starts its services, reloads TermuxBridge and opens the local dashboard.
+
+The dashboard is local-only: `http://127.0.0.1:18780`.
+
+## What it does
+
+- Persistent SQLite catalog of the accessible Android image library.
+- Incremental scan of new/changed/removed images.
+- Tesseract OCR in Russian, Latvian and English with FTS5 search.
+- On-demand thumbnails/contact sheets for ChatGPT visual inspection.
+- Local CLIP image embeddings through ONNX Runtime for natural-language visual search.
+- Visual quality features, dominant-color search, screenshot detection and dHash.
+- Persistent SHA-256 exact-duplicate indexing and dHash near-duplicate groups.
+- Virtual categories without moving source files.
+- Cleanup recommendations and reviewable plans; analysis never deletes files automatically.
+- Optional Shizuku-backed read-only access to `/storage/emulated/0/Android/data`.
+- Self-healing background workers, wake lock, resume after TermuxBridge/phone restart.
+- Local dashboard for progress, search, gallery, categories, duplicate/cleanup results and health.
+
+## Architecture
+
+```text
+ChatGPT
+   │ MCP
+   ▼
+TermuxBridge 1.2.31+
+   │ external addon ABI
+   ▼
+Photo Intelligence
+   ├─ Library index / SQLite
+   ├─ OCR / FTS5
+   ├─ Visual features / dHash
+   ├─ CLIP ONNX semantic index
+   ├─ Exact + near duplicates
+   ├─ Virtual organization
+   ├─ Cleanup planning
+   ├─ Shizuku source adapter
+   └─ Local dashboard
+```
+
+TermuxBridge remains a generic bridge. Photo-specific code and state belong to this repository/addon.
+
+## Permissions and privacy
+
+Processing is local. Source photos are read-only during indexing and analysis. The semantic model and OCR run on-device. No photo is uploaded by the addon.
+
+Normal Android shared storage works without Shizuku after Android grants Termux its storage permission. Shizuku is optional and only expands read access to `Android/data`; it is not a TermuxBridge dependency. Full `/data/data` access is not provided by ordinary Shizuku shell access and requires root.
+
+## Cleanup safety
+
+The intended mutation pipeline is:
+
+`analyze → recommend → plan → explicit approval → quarantine → undo window → final delete`
+
+The current analysis/planning APIs stop before destructive application. Source files are not removed automatically.
+
+See `docs/ARCHITECTURE.md` and `docs/SAFETY.md`.

@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.test-home/
+.tmp-*/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+models/
+.DS_Store

@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Command-line control for TermuxBridge Photo Intelligence.
+Author: @dvkrum
+"""
+from __future__ import annotations
+import json,os,signal,subprocess,sys,time,webbrowser
+from pathlib import Path
+ROOT=Path(__file__).resolve().parent; RUNTIME=ROOT/"runtime"; sys.path.insert(0,str(RUNTIME))
+from photo_config import STATE_DIR,LOG_DIR,DASHBOARD_HOST,DASHBOARD_PORT,ensure_dirs
+
+def live_pid(path,name):
+    try:
+        pid=int(path.read_text().strip()); cmd=Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0",b" ").decode(errors="replace")
+        return pid if name in cmd else None
+    except Exception:return None
+
+def start():
+    ensure_dirs(); pid=live_pid(STATE_DIR/"service.pid","service.py")
+    if pid:return {"ok":True,"state":"RUNNING","pid":pid}
+    log=(LOG_DIR/"service.log").open("ab",buffering=0); env=os.environ.copy(); env["PHOTO_INTELLIGENCE_CURRENT"]=str(ROOT)
+    p=subprocess.Popen([sys.executable,str(ROOT/"service.py")],stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,env=env)
+    time.sleep(1); return {"ok":True,"state":"STARTED","pid":p.pid}
+
+def stop():
+    pid=live_pid(STATE_DIR/"service.pid","service.py")
+    if not pid:return {"ok":True,"state":"STOPPED"}
+    os.kill(pid,signal.SIGTERM)
+    for _ in range(40):
+        if not Path(f"/proc/{pid}").exists():break
+        time.sleep(.2)
+    return {"ok":True,"state":"STOPPED" if not Path(f"/proc/{pid}").exists() else "STOPPING","pid":pid}
+
+def status():
+    ensure_dirs(); service={}
+    try:service=json.loads((STATE_DIR/"service_status.json").read_text())
+    except Exception:pass
+    sys.path.insert(0,str(RUNTIME)); import gallery_bridge_tools as g
+    base=g.gallery_status({}); ocr=g.gallery_ocr_status({}); visual=g.TOOLS["gallery_visual_status"][1]({}); semantic=g.TOOLS["gallery_semantic_status"][1]({}); duplicates=g.TOOLS["gallery_duplicate_status"][1]({})
+    try:full=json.loads((STATE_DIR/"gallery_full_ocr_status.json").read_text())
+    except Exception:full={"state":"NOT_STARTED"}
+    with g._db() as c:sh=c.execute("SELECT COUNT(*) FROM images WHERE path LIKE 'shizuku://%'").fetchone()[0]
+    return {"ok":True,"service":service,"library":{"total":base.get("indexed",0),"shizuku":sh},"ocr":ocr,"full":full,"visual":visual,"semantic":semantic,"duplicates":duplicates,"dashboard":f"http://{DASHBOARD_HOST}:{DASHBOARD_PORT}","db_integrity":base.get("db_integrity")}
+
+def main():
+    cmd=sys.argv[1] if len(sys.argv)>1 else "status"
+    if cmd=="start":result=start()
+    elif cmd=="stop":result=stop()
+    elif cmd=="restart":stop(); result=start()
+    elif cmd=="status":result=status()
+    elif cmd=="scan":
+        import gallery_bridge_tools as g; result=g.gallery_scan({})
+    elif cmd=="visual-index":
+        import gallery_bridge_tools as g; result=g.TOOLS["gallery_visual_index"][1]({"limit":int(sys.argv[2]) if len(sys.argv)>2 else 64})
+    elif cmd=="dashboard":
+        start(); url=f"http://{DASHBOARD_HOST}:{DASHBOARD_PORT}"; subprocess.run(["am","start","-a","android.intent.action.VIEW","-d",url],check=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); result={"ok":True,"url":url}
+    else: raise SystemExit("usage: photo-intelligence [status|start|stop|restart|scan|visual-index|dashboard]")
+    print(json.dumps(result,ensure_ascii=False,indent=2))
+if __name__=="__main__":main()
