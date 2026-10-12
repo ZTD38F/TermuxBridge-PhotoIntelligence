@@ -93,12 +93,23 @@ def available_cached(*, ttl: float = 30.0, force: bool = False, timeout: float =
     now = time.monotonic()
     if not force and _AVAILABILITY_CHECKED_AT and now - _AVAILABILITY_CHECKED_AT < ttl:
         return _AVAILABILITY_VALUE
+    previously_available = _AVAILABILITY_VALUE
+    probe = f"test -d {shlex.quote(ANDROID_DATA)}"
     try:
-        p = _run(f"test -d {shlex.quote(ANDROID_DATA)}", timeout=max(0.5, float(timeout)))
-        value = p.returncode == 0
+        result = _run(probe, timeout=max(0.5, float(timeout)))
+        value = result.returncode == 0
     except (OSError, subprocess.SubprocessError, RuntimeError):
         value = False
-    _AVAILABILITY_CHECKED_AT = now
+    # Shizuku occasionally stalls for a few seconds under sustained gallery OCR.
+    # Confirm a transition from READY to UNAVAILABLE once before deferring work.
+    # Never retry force=True probes used to diagnose a specific failed materialization.
+    if not value and previously_available and not force:
+        time.sleep(0.15)
+        try:
+            value = _run(probe, timeout=max(0.5, min(5.0, float(timeout) + 2.0))).returncode == 0
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            value = False
+    _AVAILABILITY_CHECKED_AT = time.monotonic()
     _AVAILABILITY_VALUE = value
     return value
 
