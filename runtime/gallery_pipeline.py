@@ -25,6 +25,18 @@ def install(g:dict[str,Any])->None:
     def pipeline_status(_):
         p=_read(STATE_DIR/"pipeline_status.json",{"ok":False,"state":"NOT_STARTED"})
         w=_read(STATE_DIR/"source_watcher_status.json",{"ok":False,"state":"NOT_STARTED"})
+        # Older scheduler payloads lack coverage_updated_at. A fresh heartbeat
+        # must not make the old progress snapshot appear current.
+        stamp=p.get("coverage_updated_at")
+        try:
+            stamp=float(stamp or 0)
+        except (TypeError,ValueError):
+            stamp=0.0
+        now=time.time()
+        age=max(0.0,now-stamp) if stamp>0 else None
+        p["coverage_updated_at"]=stamp or None
+        p["coverage_age_seconds"]=round(age,1) if age is not None else None
+        p["coverage_stale"]=age is None or age>120
         return {"ok":True,"pipeline":p,"watcher":w}
     def metrics(_):return {"ok":True,"metrics":_read(STATE_DIR/"pipeline_metrics.json",{})}
     def reconcile(args):
