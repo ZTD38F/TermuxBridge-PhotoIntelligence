@@ -18,7 +18,7 @@ class ReleaseVersionAlignmentTests(unittest.TestCase):
                      if isinstance(name,ast.Name)
                      and isinstance(stmt.value,ast.Constant)}
         self.assertEqual(info["version"],assignments["ADDON_VERSION"])
-        self.assertEqual(info["version"],"0.6.2")
+        self.assertEqual(info["version"],"0.6.3")
         self.assertEqual(info["author"],"@dvkrum")
 
     def test_database_migration_not_silently_bumped(self):
