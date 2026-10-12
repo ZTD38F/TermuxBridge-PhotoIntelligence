@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from photo_config import HOME
 import gallery_shizuku
+from gallery_decode import open_image
 MODEL_ID="Xenova/clip-vit-base-patch32-quantized"
 MODEL_DIR=HOME/"models"/"clip-vit-base-patch32"
 VISION=MODEL_DIR/"vision_model_quantized.onnx"; TEXT=MODEL_DIR/"text_model_quantized.onnx"; VOCAB=MODEL_DIR/"vocab.json"; MERGES=MODEL_DIR/"merges.txt"
@@ -103,7 +104,7 @@ def text_embedding(text):
 def image_embedding(g,row):
     np,session,text,tok=_runtime()
     with g["_materialize_row"](row) as path:
-        with g["Image"].open(path) as src:
+        with open_image(g["Image"], path) as src:
             img=g["ImageOps"].exif_transpose(src).convert("RGB")
             w,h=img.size; scale=224/min(w,h); nw=max(224,round(w*scale)); nh=max(224,round(h*scale)); img=img.resize((nw,nh),g["Image"].Resampling.BICUBIC)
             left=(nw-224)//2; top=(nh-224)//2; img=img.crop((left,top,left+224,top+224))
