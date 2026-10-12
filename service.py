@@ -15,8 +15,108 @@ STOP=False
 def stop(*_):
     global STOP; STOP=True
 
+def _owned_pipeline(pid: int, expected: Path) -> tuple[int, int]:
+    """Verify exact script, UID, parent and process start ticks before signaling."""
+    proc=Path("/proc")/str(pid)
+    if proc.stat().st_uid!=os.getuid():
+        raise RuntimeError("scheduler UID mismatch")
+    stat=(proc/"stat").read_text().rsplit(") ",1)[1].split()
+    if stat[0]=="Z":
+        return -1,int(stat[19])
+    argv=[item.decode(errors="replace") for item in
+          (proc/"cmdline").read_bytes().split(b"\x00") if item]
+    if len(argv)<2 or Path(argv[1]).resolve()!=expected.resolve():
+        raise RuntimeError("scheduler executable identity mismatch")
+    return int(stat[1]),int(stat[19])
+
+
+def _same_live_process(pid: int, start_ticks: int) -> bool:
+    """Polling after a signal must tolerate transient empty zombie cmdlines."""
+    try:
+        stat=(Path("/proc")/str(pid)/"stat").read_text().rsplit(") ",1)[1].split()
+        return stat[0]!="Z" and int(stat[19])==start_ticks
+    except (OSError,ValueError,IndexError):
+        return False
+
+
+def recover_orphaned_pipeline() -> bool:
+    """Reap only an orphan from a previous immutable addon release.
+
+    A short SIGTERM grace period is followed by a checked process-group kill
+    for a non-cooperative rish/OCR read. In-progress SQLite changes are atomic;
+    source media are never written or deleted.
+    """
+    pid_file=STATE_DIR/"pipeline_scheduler.pid"
+    try:
+        pid=int(pid_file.read_text().strip())
+    except (OSError,ValueError):
+        return False
+    proc=Path("/proc")/str(pid)
+    if not proc.exists():
+        return False
+    try:
+        argv=[v.decode(errors="replace") for v in
+              (proc/"cmdline").read_bytes().split(b"\x00") if v]
+        if len(argv)<2:
+            return False
+        script=Path(argv[1]).resolve()
+    except OSError:
+        return False
+    expected=(ROOT/"runtime/pipeline_scheduler.py").resolve()
+    if script==expected:
+        return False
+    # Only an immutable older release of THIS addon qualifies.
+    previous=script.parent.parent
+    releases=ROOT.parent.resolve()
+    if (releases.name!="releases" or previous.parent!=releases
+            or script!=previous/"runtime/pipeline_scheduler.py"
+            or not previous.is_dir() or previous==ROOT.resolve()):
+        raise RuntimeError("unknown scheduler owns gallery lock")
+    meta=json.loads((previous/"addon.json").read_text())
+    if (meta.get("name")!="photo-intelligence" or
+            meta.get("version")!=previous.name):
+        raise RuntimeError("previous scheduler manifest invalid")
+    ppid,ticks=_owned_pipeline(pid,script)
+    if ppid==-1:
+        return False
+    if ppid!=1 or os.getpgid(pid)!=pid:
+        raise RuntimeError("scheduler is managed elsewhere; refusing to signal")
+    os.killpg(pid,signal.SIGTERM)
+    deadline=time.monotonic()+4
+    while time.monotonic()<deadline:
+        if not _same_live_process(pid,ticks):
+            return True
+        time.sleep(.1)
+    # Non-cooperative child: reverify identity and process group before killing.
+    current_parent,current_ticks=_owned_pipeline(pid,script)
+    if current_ticks!=ticks or current_parent!=1 or os.getpgid(pid)!=pid:
+        raise RuntimeError("scheduler identity changed while retiring")
+    os.killpg(pid,signal.SIGKILL)
+    deadline=time.monotonic()+3
+    while time.monotonic()<deadline:
+        if not _same_live_process(pid,ticks):
+            return True
+        time.sleep(.1)
+    raise RuntimeError("old pipeline did not retire")
+
+
+def _pipeline_ready(children):
+    p=children.get("pipeline")
+    if p is None or p.poll() is not None:
+        return False
+    try:
+        current=int((STATE_DIR/"pipeline_scheduler.pid").read_text().strip())
+        if current!=p.pid:
+            return False
+        parent,_=_owned_pipeline(current,(ROOT/"runtime/pipeline_scheduler.py").resolve())
+        return parent!=-1
+    except (OSError,ValueError,RuntimeError):
+        return False
+
+
 def write_status(children):
-    payload={"ok":True,"state":"RUNNING" if not STOP else "STOPPING","pid":os.getpid(),"timestamp":time.time(),"children":{k:{"pid":p.pid,"running":p.poll() is None} for k,p in children.items()}}
+    ready=_pipeline_ready(children)
+    payload={"ok":True,"state":"STOPPING" if STOP else ("RUNNING" if ready else "DEGRADED"),"pid":os.getpid(),"timestamp":time.time(),"children":{k:{"pid":p.pid,"running":(p.poll() is None and (k!="pipeline" or ready))} for k,p in children.items()}}
     tmp=STATUS.with_name("."+STATUS.name+".tmp"); tmp.write_text(json.dumps(payload,separators=(",",":"))+"\n"); tmp.chmod(0o600); os.replace(tmp,STATUS)
 
 def spawn(name,script,log_name):
@@ -69,6 +169,7 @@ def main():
         children={}
         specs={"pipeline":(RUNTIME/"pipeline_scheduler.py","pipeline.log"),"watcher":(RUNTIME/"source_watcher.py","watcher.log"),"dashboard":(RUNTIME/"dashboard_server.py","dashboard.log")}
         try:
+            recover_orphaned_pipeline()
             while not STOP:
                 for name,(script,log) in specs.items():
                     p=children.get(name)
