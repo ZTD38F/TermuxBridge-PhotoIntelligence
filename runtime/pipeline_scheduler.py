@@ -13,6 +13,8 @@ from pathlib import Path
 import gallery_bridge_tools as g
 from photo_config import STATE_DIR,ensure_dirs
 from photo_settings import effective
+COVERAGE_POLL_INTERVAL=60.0
+_LAST_COVERAGE_CHECK=0.0
 LOCK=STATE_DIR/"pipeline_scheduler.lock";PID=STATE_DIR/"pipeline_scheduler.pid";STATUS=STATE_DIR/"pipeline_status.json";METRICS=STATE_DIR/"pipeline_metrics.json";DIRTY=STATE_DIR/"source_dirty.json";STOP=False
 
 
@@ -57,9 +59,34 @@ def summarize(result):
     return out
 
 def _heartbeat(stage,cfg,b):
+    """Write heartbeat promptly; checkpoint read-only coverage <= once/minute.
+
+    A long/shaky source query must never hide a live worker heartbeat.  The
+    published coverage timestamp is independent from the liveness timestamp.
+    """
+    global _LAST_COVERAGE_CHECK
     current=read_json(STATUS,{})
-    current.update({"ok":True,"state":"RUNNING","phase":stage,"profile":cfg.get("profile","balanced"),"pid":os.getpid(),"battery":b,"timestamp":time.time()})
+    now=time.time()
+    old=float(current.get("coverage_updated_at",0) or 0)
+    current.update({"ok":True,"state":"RUNNING","phase":stage,"profile":cfg.get("profile","balanced"),
+                    "pid":os.getpid(),"battery":b,"timestamp":now,
+                    "coverage_stale":not (old>0 and now-old<=120)})
     atomic(STATUS,current)
+    mono=time.monotonic()
+    if not _LAST_COVERAGE_CHECK or mono-_LAST_COVERAGE_CHECK>=COVERAGE_POLL_INTERVAL:
+        _LAST_COVERAGE_CHECK=mono  # throttle failures too
+        try:
+            current["coverage"]=coverage()
+            current["coverage_updated_at"]=time.time()
+        except Exception:
+            current["coverage_refresh_error"]="COVERAGE_UNAVAILABLE"
+        else:
+            current.pop("coverage_refresh_error",None)
+        updated_at=float(current.get("coverage_updated_at",0) or 0)
+        current["coverage_stale"]=not (updated_at>0 and time.time()-updated_at<=120)
+        current["timestamp"]=time.time()
+        atomic(STATUS,current)
+
 
 def run_stage(name,fn,metrics,cfg,b):
     started=time.monotonic();result=None
@@ -126,7 +153,7 @@ def main():
                 elif deferred:state="DEFERRED_SOURCE"
                 else:state="IDLE"
                 metrics["cycles"]=int(metrics.get("cycles",0))+1;metrics["last_cycle_seconds"]=round(time.monotonic()-cycle_start,3);metrics["last_cycle_at"]=time.time();atomic(METRICS,metrics)
-                payload={"ok":True,"state":state,"phase":None,"profile":cfg["profile"],"pid":os.getpid(),"battery":b,"power_pause_reason":pause_reason,"coverage":cov,"last":last,"cycle_seconds":metrics["last_cycle_seconds"],"dirty":DIRTY.exists(),"timestamp":time.time()};atomic(STATUS,payload)
+                payload={"ok":True,"state":state,"phase":None,"profile":cfg["profile"],"pid":os.getpid(),"battery":b,"power_pause_reason":pause_reason,"coverage":cov,"coverage_updated_at":time.time(),"coverage_stale":False,"last":last,"cycle_seconds":metrics["last_cycle_seconds"],"dirty":DIRTY.exists(),"timestamp":time.time()};atomic(STATUS,payload)
                 write_legacy_ocr(cov,last.get("ocr",{}),"COMPLETE" if cov["ocr"]["remaining"]==0 else ("PAUSED" if not allowed else "RUNNING"))
                 delay=float(cfg["busy_sleep"] if work else cfg["idle_sleep"]);end=time.monotonic()+delay
                 while not STOP and time.monotonic()<end:time.sleep(min(.2,max(0,end-time.monotonic())))
