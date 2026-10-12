@@ -5,6 +5,7 @@ from __future__ import annotations
 import math, statistics, time
 from typing import Any
 import gallery_shizuku
+from gallery_decode import open_image
 VERSION = "0.1.2"
 
 def install(g: dict[str, Any]) -> None:
@@ -32,7 +33,7 @@ def install(g: dict[str, Any]) -> None:
     def metrics(row):
         if not g["PIL_AVAILABLE"]: raise RuntimeError("Pillow unavailable")
         with g["_materialize_row"](row) as p:
-            with g["Image"].open(p) as src:
+            with open_image(g["Image"], p) as src:
                 img=g["ImageOps"].exif_transpose(src).convert("RGB"); width,height=img.size
                 thumb=img.copy(); thumb.thumbnail((256,256),g["Image"].Resampling.BILINEAR)
                 gray=thumb.convert("L"); pixels=list(gray.get_flattened_data()) if hasattr(gray,"get_flattened_data") else list(gray.getdata())
