@@ -50,10 +50,28 @@ def install(g:dict[str,Any])->None:
         if db.get("db_integrity")!="ok":issues.append("DATABASE_INTEGRITY")
         if not pipe or now-float(pipe.get("timestamp",0))>120:issues.append("PIPELINE_STALE")
         if not svc or now-float(svc.get("timestamp",0))>120:issues.append("SERVICE_STALE")
+        if svc and pipe and svc.get("state")=="RUNNING" and pipe.get("state")=="RUNNING":
+            # A new service may spawn a child that immediately exits because an
+            # orphan from the *same* release still holds the scheduler lock.
+            # An advancing old worker heartbeat alone is not proof of service
+            # ownership. Diagnose only; never signal or reap an unverified PID.
+            try:
+                expected=Path(__file__).resolve().parent/"pipeline_scheduler.py"
+                child=svc["children"]["pipeline"]
+                managed_pid=int(child["pid"])
+                status_pid=int(pipe["pid"])
+                lock_pid=int((STATE_DIR/"pipeline_scheduler.pid").read_text().strip())
+                argv=[v.decode(errors="replace") for v in
+                      (Path("/proc")/str(status_pid)/"cmdline").read_bytes().split(bytes([0])) if v]
+                owns=(child.get("running") is True and managed_pid==status_pid==lock_pid
+                      and len(argv)>=2 and Path(argv[1]).resolve()==expected.resolve())
+                if not owns:issues.append("PIPELINE_OWNER_MISMATCH")
+            except (OSError,ValueError,KeyError,TypeError,IndexError):
+                issues.append("PIPELINE_OWNER_UNVERIFIED")
         if effective().get("watch_local") and (not watch or now-float(watch.get("timestamp",0))>120):issues.append("WATCHER_STALE")
         if not sem.get("available"):issues.append("SEMANTIC_MODEL_UNAVAILABLE")
         deferred=src.get("deferred_sources",[])
-        return {"ok":not any(x in issues for x in ("DATABASE_INTEGRITY","PIPELINE_STALE","SERVICE_STALE")),"state":"HEALTHY" if not issues and not deferred else "DEGRADED" if issues or deferred else "HEALTHY","issues":issues,"deferred_sources":deferred,"database":db.get("db_integrity"),"pipeline":pipe.get("state","NOT_STARTED"),"profile":effective()["profile"],"library":db.get("indexed",0),"timestamp":now}
+        return {"ok":not any(x in issues for x in ("DATABASE_INTEGRITY","PIPELINE_STALE","SERVICE_STALE","PIPELINE_OWNER_MISMATCH","PIPELINE_OWNER_UNVERIFIED")),"state":"HEALTHY" if not issues and not deferred else "DEGRADED" if issues or deferred else "HEALTHY","issues":issues,"deferred_sources":deferred,"database":db.get("db_integrity"),"pipeline":pipe.get("state","NOT_STARTED"),"profile":effective()["profile"],"library":db.get("indexed",0),"timestamp":now}
     tools["gallery_settings_get"]=(schema(),settings_get)
     tools["gallery_settings_update"]=(schema({"changes":{"type":"object","additionalProperties":True}},["changes"]),settings_update)
     tools["gallery_pipeline_status"]=(schema(),pipeline_status)

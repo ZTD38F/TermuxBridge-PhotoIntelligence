@@ -118,6 +118,60 @@ class CoverageFreshnessTests(unittest.TestCase):
         self.status.write_text(json.dumps({'coverage_updated_at':t-200,'timestamp':t}))
         self.assertTrue(self.tool()['pipeline']['coverage_stale'])
 
+    def test_health_detects_same_release_orphan_without_signaling(self):
+        import os
+        now=time.time()
+        for label,managed,active,expect_error in (
+            ('mismatch',4101,4102,'PIPELINE_OWNER_MISMATCH'),
+            ('matched',4103,4103,None),
+        ):
+            (self.state/'service_status.json').write_text(json.dumps({
+                'state':'RUNNING','timestamp':now,
+                'children':{'pipeline':{'pid':managed,'running':True}}}))
+            self.status.write_text(json.dumps({
+                'state':'RUNNING','timestamp':now,'pid':active}))
+            (self.state/'pipeline_scheduler.pid').write_text(str(active))
+            expected=Path(gallery_pipeline.__file__).resolve().parent/'pipeline_scheduler.py'
+            command=b'python\x00'+str(expected).encode()+b'\x00'
+            d={'_schema':lambda *a,**k:{},'TOOLS':{
+                'gallery_source_status':({},lambda _:{'deferred_sources':[]}),
+                'gallery_semantic_status':({},lambda _:{'available':True})},
+                'DESCRIPTIONS':{},'READ_ONLY':set(),
+                'gallery_status':lambda _:{'db_integrity':'ok','indexed':0}}
+            gallery_pipeline.install(d)
+            with patch.object(gallery_pipeline,'effective',return_value={
+                 'watch_local':False,'profile':'unlimited'}), \
+                 patch.object(Path,'read_bytes',return_value=command), \
+                 patch.object(os,'kill',side_effect=AssertionError('must be read only')):
+                h=d['TOOLS']['gallery_health'][1]({})
+            if expect_error:
+                self.assertFalse(h['ok'],label)
+                self.assertIn(expect_error,h['issues'])
+                self.assertEqual(h['state'],'DEGRADED')
+            else:
+                self.assertTrue(h['ok'],h)
+                self.assertEqual(h['state'],'HEALTHY')
+
+    def test_health_flags_unknown_pipeline_owner(self):
+        now=time.time()
+        (self.state/'service_status.json').write_text(json.dumps({
+            'state':'RUNNING','timestamp':now,
+            'children':{'pipeline':{'pid':4411,'running':True}}}))
+        self.status.write_text(json.dumps({
+            'state':'RUNNING','timestamp':now,'pid':4411}))
+        # Deliberately no scheduler.pid file.
+        d={'_schema':lambda *a,**k:{},'TOOLS':{
+            'gallery_source_status':({},lambda _:{'deferred_sources':[]}),
+            'gallery_semantic_status':({},lambda _:{'available':True})},
+            'DESCRIPTIONS':{},'READ_ONLY':set(),
+            'gallery_status':lambda _:{'db_integrity':'ok','indexed':0}}
+        gallery_pipeline.install(d)
+        with patch.object(gallery_pipeline,'effective',return_value={
+            'watch_local':False,'profile':'unlimited'}):
+            status=d['TOOLS']['gallery_health'][1]({})
+        self.assertFalse(status['ok'])
+        self.assertIn('PIPELINE_OWNER_UNVERIFIED',status['issues'])
+
     def test_only_synthetic_scheduler_state_is_written(self):
         with patch.object(scheduler,'coverage',return_value={'library':0}):
             self.heartbeat()
