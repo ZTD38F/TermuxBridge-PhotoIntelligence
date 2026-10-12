@@ -56,7 +56,8 @@ def open_image(image_module, path):
             "-threads", "2", "-i", str(path), "-map", "0:v:0",
             "-frames:v", "1", "-vf",
             f"scale={PREVIEW_EDGE}:{PREVIEW_EDGE}:force_original_aspect_ratio=decrease",
-            "-c:v", "png", "-f", "image2", "-y", str(preview)
+            "-c:v", "png", "-f", "image2",
+            "-fs", str(MAX_PREVIEW_BYTES), "-y", str(preview)
         ]
         try:
             done = subprocess.run(

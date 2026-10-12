@@ -56,6 +56,8 @@ class DecodeFallbackTests(unittest.TestCase):
                     self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
                     self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
                     self.assertTrue(any("force_original_aspect_ratio=decrease" in x for x in command))
+                    self.assertEqual(command[command.index("-fs") + 1],
+                                     str(gallery_decode.MAX_PREVIEW_BYTES))
                     Image.new("RGB", (30, 20), (20, 60, 99)).save(command[-1])
                     return subprocess.CompletedProcess(command, 0)
                 with patch.object(gallery_decode.subprocess, "run", side_effect=fake_ffmpeg) as runner:
