@@ -37,6 +37,15 @@ class CoverageFreshnessTests(unittest.TestCase):
     def read(self):
         return json.loads(self.status.read_text())
 
+    def until(self,predicate,timeout=3):
+        end=time.monotonic()+timeout
+        while time.monotonic()<end:
+            d=self.read()
+            if predicate(d):
+                return d
+            time.sleep(.01)
+        self.fail("Coverage callback did not finish in bounded test window")
+
     def test_running_stage_refreshes_coverage_once_per_minute(self):
         counts=[{'ocr':{'processed':4},'library':10},
                 {'ocr':{'processed':9},'library':10}]
@@ -46,7 +55,7 @@ class CoverageFreshnessTests(unittest.TestCase):
             return counts[min(len(hits)-1,1)]
         with patch.object(scheduler,'coverage',side_effect=fake_coverage):
             self.heartbeat()
-            first=self.read()
+            first=self.until(lambda d:d.get('coverage',{}).get('ocr',{}).get('processed')==4)
             self.assertEqual(first['coverage']['ocr']['processed'],4)
             self.assertFalse(first['coverage_stale'])
             self.assertLess(abs(first['coverage_updated_at']-time.time()),5)
@@ -54,8 +63,10 @@ class CoverageFreshnessTests(unittest.TestCase):
             self.assertEqual(len(hits),1)
             self.assertEqual(self.read()['coverage']['ocr']['processed'],4)
             # Simulate a long stage without a real one-minute sleep.
+            self.until(lambda _:not scheduler._COVERAGE_LOCK.locked())
             scheduler._LAST_COVERAGE_CHECK-=61
             self.heartbeat()
+            self.until(lambda d:d.get('coverage',{}).get('ocr',{}).get('processed')==9)
             self.assertEqual(len(hits),2)
             self.assertEqual(self.read()['coverage']['ocr']['processed'],9)
             self.assertFalse(self.read()['coverage_stale'])
@@ -70,29 +81,51 @@ class CoverageFreshnessTests(unittest.TestCase):
                 raise TimeoutError('synthetic slow count')
             return {'ocr':{'processed':7}}
         with patch.object(scheduler,'coverage',side_effect=simulated_slow_query):
-            thread=threading.Thread(target=self.heartbeat,daemon=True)
-            thread.start()
-            try:
-                self.assertTrue(query_started.wait(1))
-                # Even while the snapshot is blocked, a fresh liveness marker exists.
-                transient=self.read()
-                self.assertEqual(transient['state'],'RUNNING')
-                self.assertEqual(transient['phase'],'ocr')
-                self.assertTrue(transient['coverage_stale'])
-                self.assertLess(abs(transient['timestamp']-time.time()),3)
-            finally:
-                release_query.set()
-                thread.join(3)
-            self.assertFalse(thread.is_alive())
+            before=time.monotonic()
+            self.heartbeat()  # must NOT wait for the slow work
+            self.assertLess(time.monotonic()-before,0.5)
+            self.assertTrue(query_started.wait(1))
+            transient=self.read()
+            self.assertEqual(transient['state'],'RUNNING')
+            self.assertEqual(transient['phase'],'ocr')
+            self.assertTrue(transient['coverage_stale'])
+            self.assertLess(abs(transient['timestamp']-time.time()),3)
+            # A second heartbeat stays cheap while the coverage thread is busy.
+            before=time.monotonic()
+            self.heartbeat()
+            self.assertLess(time.monotonic()-before,0.5)
+            release_query.set()
+            self.until(lambda d:d.get('coverage',{}).get('ocr',{}).get('processed')==7)
             self.assertFalse(self.read()['coverage_stale'])
-            self.assertEqual(self.read()['coverage']['ocr']['processed'],7)
+
+    def test_stalled_snapshot_cannot_spawn_second_reader(self):
+        import threading
+        entered=threading.Event()
+        release=threading.Event()
+        count=[]
+        def blocked():
+            count.append(1)
+            entered.set()
+            release.wait(2)
+            return {'library':1}
+        with patch.object(scheduler,'coverage',side_effect=blocked):
+            try:
+                self.heartbeat()
+                self.assertTrue(entered.wait(1))
+                scheduler._LAST_COVERAGE_CHECK-=121
+                self.heartbeat()
+                self.assertEqual(len(count),1)
+                self.assertLess(abs(self.read()['timestamp']-time.time()),2)
+            finally:
+                release.set()
+            self.until(lambda d:d.get('coverage',{}).get('library')==1)
 
     def test_failure_retains_old_snapshot_and_marks_stale(self):
         self.status.write_text(json.dumps({'coverage':{'ocr':{'processed':3}},
             'coverage_updated_at':time.time()-180, 'timestamp':time.time()}))
         with patch.object(scheduler,'coverage',side_effect=RuntimeError('synthetic')):
             self.heartbeat()
-        p=self.read()
+            p=self.until(lambda d:d.get('coverage_refresh_error')=='COVERAGE_UNAVAILABLE')
         self.assertTrue(p['coverage_stale'])
         self.assertEqual(p['coverage']['ocr']['processed'],3)
         self.assertEqual(p['coverage_refresh_error'],'COVERAGE_UNAVAILABLE')
@@ -175,6 +208,7 @@ class CoverageFreshnessTests(unittest.TestCase):
     def test_only_synthetic_scheduler_state_is_written(self):
         with patch.object(scheduler,'coverage',return_value={'library':0}):
             self.heartbeat()
+            self.until(lambda d:d.get('coverage',{}).get('library')==0)
         self.assertEqual({p.name for p in self.state.iterdir()},{'pipeline_status.json'})
         self.assertEqual(self.read()['coverage']['library'],0)
 

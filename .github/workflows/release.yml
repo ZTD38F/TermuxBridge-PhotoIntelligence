@@ -47,8 +47,15 @@ jobs:
             echo "::error::Release $TAG is immutable; bump addon.json before publishing."
             exit 1
           fi
+          # Only Git-tracked, reviewed files at the exact stable commit.
+          # The test job creates .release-test-home/state/gallery.sqlite3 and
+          # Python caches in checkout: rsync of the working tree previously
+          # leaked these state artifacts into a public release archive.
           mkdir -p dist/package
-          rsync -a --exclude .git --exclude dist ./ dist/package/
+          git archive --format=tar "$GITHUB_SHA" | tar -xf - -C dist/package
+          test -f dist/package/addon.json
+          test ! -e dist/package/.release-test-home
+          test ! -d dist/package/__pycache__
           tar -C dist/package -czf "dist/TermuxBridge-PhotoIntelligence-$TAG.tar.gz" .
           (cd dist && sha256sum "TermuxBridge-PhotoIntelligence-$TAG.tar.gz" > SHA256SUMS.txt)
           python - <<PY
