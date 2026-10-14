@@ -7,7 +7,7 @@ engines remain independently resumable through SQLite, so a process restart
 never loses completed work.
 """
 from __future__ import annotations
-import fcntl,json,os,signal,subprocess,time
+import fcntl,json,os,signal,subprocess,threading,time
 from concurrent.futures import ThreadPoolExecutor,TimeoutError as FutureTimeout
 from pathlib import Path
 import gallery_bridge_tools as g
@@ -15,6 +15,8 @@ from photo_config import STATE_DIR,ensure_dirs
 from photo_settings import effective
 COVERAGE_POLL_INTERVAL=60.0
 _LAST_COVERAGE_CHECK=0.0
+_COVERAGE_LOCK=threading.Lock()
+_STATUS_LOCK=threading.Lock()
 LOCK=STATE_DIR/"pipeline_scheduler.lock";PID=STATE_DIR/"pipeline_scheduler.pid";STATUS=STATE_DIR/"pipeline_status.json";METRICS=STATE_DIR/"pipeline_metrics.json";DIRTY=STATE_DIR/"source_dirty.json";STOP=False
 
 
@@ -58,34 +60,59 @@ def summarize(result):
         if isinstance(value,list):out[dst]=len(value)
     return out
 
-def _heartbeat(stage,cfg,b):
-    """Write heartbeat promptly; checkpoint read-only coverage <= once/minute.
+def _refresh_coverage_in_background() -> None:
+    """Bounded to one outstanding read-only snapshot, never blocks liveness."""
+    try:
+        try:
+            snapshot=coverage()
+            error=None
+        except Exception:
+            snapshot=None
+            error="COVERAGE_UNAVAILABLE"
+        with _STATUS_LOCK:
+            current=read_json(STATUS,{})
+            # A prior cycle or a newer owner may have finished meanwhile.
+            if current.get("state")!="RUNNING" or current.get("pid")!=os.getpid():
+                return
+            if error:
+                current["coverage_refresh_error"]=error
+            else:
+                current["coverage"]=snapshot
+                current["coverage_updated_at"]=time.time()
+                current.pop("coverage_refresh_error",None)
+            stamp=float(current.get("coverage_updated_at",0) or 0)
+            current["coverage_stale"]=not (stamp>0 and 0<=time.time()-stamp<=120)
+            atomic(STATUS,current)
+    finally:
+        _COVERAGE_LOCK.release()
 
-    A long/shaky source query must never hide a live worker heartbeat.  The
-    published coverage timestamp is independent from the liveness timestamp.
+
+def _heartbeat(stage,cfg,b):
+    """Keep the real 5s worker heartbeat independent of Shizuku/SQLite reads.
+
+    A daemon thread performs at most one coverage read per 60s. A stalled read
+    cannot block the scheduler or spawn unlimited readers; no media is written.
     """
     global _LAST_COVERAGE_CHECK
-    current=read_json(STATUS,{})
     now=time.time()
-    old=float(current.get("coverage_updated_at",0) or 0)
-    current.update({"ok":True,"state":"RUNNING","phase":stage,"profile":cfg.get("profile","balanced"),
-                    "pid":os.getpid(),"battery":b,"timestamp":now,
-                    "coverage_stale":not (old>0 and now-old<=120)})
-    atomic(STATUS,current)
-    mono=time.monotonic()
-    if not _LAST_COVERAGE_CHECK or mono-_LAST_COVERAGE_CHECK>=COVERAGE_POLL_INTERVAL:
-        _LAST_COVERAGE_CHECK=mono  # throttle failures too
-        try:
-            current["coverage"]=coverage()
-            current["coverage_updated_at"]=time.time()
-        except Exception:
-            current["coverage_refresh_error"]="COVERAGE_UNAVAILABLE"
-        else:
-            current.pop("coverage_refresh_error",None)
-        updated_at=float(current.get("coverage_updated_at",0) or 0)
-        current["coverage_stale"]=not (updated_at>0 and time.time()-updated_at<=120)
-        current["timestamp"]=time.time()
+    with _STATUS_LOCK:
+        current=read_json(STATUS,{})
+        stamp=float(current.get("coverage_updated_at",0) or 0)
+        current.update({"ok":True,"state":"RUNNING","phase":stage,
+                        "profile":cfg.get("profile","balanced"),"pid":os.getpid(),
+                        "battery":b,"timestamp":now,
+                        "coverage_stale":not (stamp>0 and 0<=now-stamp<=120)})
         atomic(STATUS,current)
+    mono=time.monotonic()
+    if (not _LAST_COVERAGE_CHECK or mono-_LAST_COVERAGE_CHECK>=COVERAGE_POLL_INTERVAL):
+        if _COVERAGE_LOCK.acquire(blocking=False):
+            _LAST_COVERAGE_CHECK=mono
+            try:
+                threading.Thread(target=_refresh_coverage_in_background,
+                                 name="photo-coverage",daemon=True).start()
+            except Exception:
+                _COVERAGE_LOCK.release()
+                raise
 
 
 def run_stage(name,fn,metrics,cfg,b):
@@ -153,7 +180,8 @@ def main():
                 elif deferred:state="DEFERRED_SOURCE"
                 else:state="IDLE"
                 metrics["cycles"]=int(metrics.get("cycles",0))+1;metrics["last_cycle_seconds"]=round(time.monotonic()-cycle_start,3);metrics["last_cycle_at"]=time.time();atomic(METRICS,metrics)
-                payload={"ok":True,"state":state,"phase":None,"profile":cfg["profile"],"pid":os.getpid(),"battery":b,"power_pause_reason":pause_reason,"coverage":cov,"coverage_updated_at":time.time(),"coverage_stale":False,"last":last,"cycle_seconds":metrics["last_cycle_seconds"],"dirty":DIRTY.exists(),"timestamp":time.time()};atomic(STATUS,payload)
+                payload={"ok":True,"state":state,"phase":None,"profile":cfg["profile"],"pid":os.getpid(),"battery":b,"power_pause_reason":pause_reason,"coverage":cov,"coverage_updated_at":time.time(),"coverage_stale":False,"last":last,"cycle_seconds":metrics["last_cycle_seconds"],"dirty":DIRTY.exists(),"timestamp":time.time()}
+                with _STATUS_LOCK:atomic(STATUS,payload)
                 write_legacy_ocr(cov,last.get("ocr",{}),"COMPLETE" if cov["ocr"]["remaining"]==0 else ("PAUSED" if not allowed else "RUNNING"))
                 delay=float(cfg["busy_sleep"] if work else cfg["idle_sleep"]);end=time.monotonic()+delay
                 while not STOP and time.monotonic()<end:time.sleep(min(.2,max(0,end-time.monotonic())))
