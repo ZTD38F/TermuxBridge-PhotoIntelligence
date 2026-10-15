@@ -45,6 +45,44 @@ class ShizukuTransientTests(unittest.TestCase):
             self.assertEqual(run.call_count,1)
             self.assertEqual(run.call_args.kwargs["timeout"],8.0)
 
+    def test_user_optout_never_invokes_rish_and_clears_cached_ready(self):
+        shizuku._AVAILABILITY_VALUE=True
+        shizuku._AVAILABILITY_CHECKED_AT=shizuku.time.monotonic()
+        with patch.object(shizuku.photo_settings,'load',
+                          return_value={'use_shizuku':False}), \
+             patch.object(shizuku.subprocess,'run',
+                          side_effect=AssertionError('rish must not run')) as run:
+            self.assertFalse(shizuku.available_cached())
+            self.assertFalse(shizuku.available_cached(force=True))
+            self.assertFalse(shizuku._AVAILABILITY_VALUE)
+            self.assertFalse(shizuku.enabled())
+            with self.assertRaises(shizuku.ShizukuUnavailable):
+                shizuku._run('test -d /storage/emulated/0/Android/data')
+            with self.assertRaises(shizuku.ShizukuUnavailable):
+                shizuku._remote_output('echo unsafe')
+            with self.assertRaises(shizuku.ShizukuUnavailable):
+                with shizuku.materialize(
+                    'shizuku:///storage/emulated/0/Android/data/test/x.jpg',
+                    7,100.0,shizuku.Path('/tmp')):
+                    pass
+            run.assert_not_called()
+
+    def test_user_optout_settings_persistence_and_validation(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory(prefix='photo-policy-test-') as d:
+            settings_file=Path(d)/'settings.json'
+            with patch.object(shizuku.photo_settings,'SETTINGS',settings_file):
+                current=shizuku.photo_settings.update({'use_shizuku':False})
+                self.assertFalse(current['use_shizuku'])
+                self.assertFalse(shizuku.enabled())
+                self.assertFalse(shizuku.photo_settings.load()['use_shizuku'])
+                with self.assertRaises(ValueError):
+                    shizuku.photo_settings.update({'use_shizuku':'false'})
+                self.assertFalse(shizuku.photo_settings.load()['use_shizuku'])
+                self.assertTrue(shizuku.photo_settings.update(
+                    {'use_shizuku':True})['use_shizuku'])
+
     def test_ready_cached_does_not_spawn_process(self):
         shizuku._AVAILABILITY_CHECKED_AT=shizuku.time.monotonic()
         shizuku._AVAILABILITY_VALUE=True
