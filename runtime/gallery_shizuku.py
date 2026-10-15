@@ -12,6 +12,7 @@ import os, secrets, shlex, subprocess, time
 from pathlib import Path
 from typing import Iterable
 from photo_config import EXCHANGE_DIR
+import photo_settings
 
 class ShizukuUnavailable(RuntimeError):
     """Transient Shizuku/rish outage; callers should preserve index and retry later."""
@@ -41,7 +42,14 @@ def to_absolute(value: str) -> str:
         raise ValueError("invalid Shizuku source")
     return path
 
+def enabled() -> bool:
+    """User-controlled opt-out; avoids every external privileged probe."""
+    return photo_settings.load().get("use_shizuku", True) is True
+
+
 def _run(command: str, *, timeout: float = 30) -> subprocess.CompletedProcess:
+    if not enabled():
+        raise ShizukuUnavailable("Shizuku disabled by user")
     if not RISH.is_file():
         raise RuntimeError("rish unavailable")
     return subprocess.run([str(RISH), "-c", command],
@@ -68,6 +76,8 @@ def _exchange_path() -> Path:
     return EXCHANGE_DIR / f"{EXCHANGE_PREFIX}{secrets.token_hex(12)}.tmp"
 
 def _remote_output(command: str, *, timeout: float = 60, attempts: int = 3) -> bytes:
+    if not enabled():
+        raise ShizukuUnavailable("Shizuku disabled by user")
     last: Exception | None = None
     for attempt in range(max(1, attempts)):
         target = _exchange_path()
@@ -91,6 +101,10 @@ def _remote_output(command: str, *, timeout: float = 60, attempts: int = 3) -> b
 def available_cached(*, ttl: float = 30.0, force: bool = False, timeout: float = 3.0) -> bool:
     global _AVAILABILITY_CHECKED_AT, _AVAILABILITY_VALUE
     now = time.monotonic()
+    if not enabled():
+        _AVAILABILITY_CHECKED_AT = now
+        _AVAILABILITY_VALUE = False
+        return False
     if not force and _AVAILABILITY_CHECKED_AT and now - _AVAILABILITY_CHECKED_AT < ttl:
         return _AVAILABILITY_VALUE
     previously_available = _AVAILABILITY_VALUE
@@ -160,6 +174,8 @@ def validate(value: str, expected_size: int, expected_mtime: float) -> None:
 
 @contextmanager
 def materialize(value: str, expected_size: int, expected_mtime: float, state_dir: Path):
+    if not enabled():
+        raise ShizukuUnavailable("Shizuku disabled by user")
     del state_dir  # kept in signature for the generic gallery source abstraction
     validate(value, expected_size, expected_mtime)
     absolute = to_absolute(value)
