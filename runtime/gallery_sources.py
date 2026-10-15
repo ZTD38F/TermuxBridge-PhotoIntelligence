@@ -15,7 +15,7 @@ def install(g: dict[str,Any]) -> None:
         return {"ok":True,"total":total,
                 "sources":{"local_shared_storage":{"indexed":total-sh,"available":True,"state":"READY"},
                            "android_data_shizuku":{"indexed":sh,"available":sh_available,
-                                                   "state":"READY" if sh_available else "DEFERRED"}},
+                                                   "state":"READY" if sh_available else "DISABLED" if not gallery_shizuku.enabled() else "DEFERRED"}},
                 "deferred_sources":[] if sh_available else (["android_data_shizuku"] if sh else [])}
     tools["gallery_source_status"]=(schema(),status)
     descriptions["gallery_source_status"]="Show indexed photo sources and whether each source is currently available."

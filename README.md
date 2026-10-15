@@ -92,3 +92,15 @@ From v0.2.0, a unified scheduler coordinates scan → OCR → visual → duplica
 ### Hybrid Search 2.0
 
 `gallery_hybrid_search` fuses metadata, OCR and local CLIP signals and explains why each image matched. Russian and Latvian visual queries receive local English CLIP variants; no translation API is used. `gallery_search_contact_sheet` returns a compact visual candidate sheet for ChatGPT reranking.
+
+
+### Use without Shizuku / native-only policy (0.6.7)
+
+The optional use_shizuku boolean (default true for backward compatibility)
+can be set to false with gallery_settings_update or /api/settings.
+When false, Shizuku/rish is never invoked by Photo Intelligence, even on
+materialization or an explicit source probe. The Android/data source reports
+DISABLED, and previously indexed rows are retained, not pruned. Local
+DCIM/Pictures/Download OCR, visual and semantic indexing keep working.
+This setting does not itself grant direct Android/data byte access to Termux.
+Enable it again only if you consciously choose a different access policy.
