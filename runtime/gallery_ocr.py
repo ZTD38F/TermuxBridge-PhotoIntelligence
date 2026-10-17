@@ -127,6 +127,13 @@ def install(g: dict[str, Any]) -> None:
         if not g["PIL_AVAILABLE"]:
             raise RuntimeError("Pillow missing")
         with g["Image"].open(path) as source:
+            # Modern phone cameras produce 50-64 MP JPEGs. Pillow/JPEG
+            # supports decoder-level IDCT draft scaling (1/2, 1/4, 1/8),
+            # so we can recognize them without allocating a full-size
+            # uncompressed RGB bitmap. Retain the safety limit for other
+            # formats or JPEG decoders that cannot reduce the dimensions.
+            if source.width * source.height > 45_000_000 and source.format == "JPEG":
+                source.draft("RGB", (1500, 1500))
             if source.width * source.height > 45_000_000:
                 raise ValueError("image pixel count exceeds OCR safety limit")
             image = g["ImageOps"].exif_transpose(source)

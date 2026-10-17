@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 ADDON_NAME = "photo-intelligence"
-ADDON_VERSION = "0.6.8"
+ADDON_VERSION = "0.6.9"
 ADDON_ABI = 1
 BRIDGE_MAJOR = 1
 
