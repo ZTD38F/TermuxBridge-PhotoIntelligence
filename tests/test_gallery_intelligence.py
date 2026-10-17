@@ -96,6 +96,51 @@ class GalleryTests(unittest.TestCase):
         similar = self.m.gallery_similar({"ids":res["groups"][0]["ids"]})
         self.assertEqual(similar["pairs"][0]["distance"],0)
 
+    def test_pruned_image_history_is_preserved_and_reappearance_marked(self):
+        first=self.m.gallery_scan({})
+        self.assertTrue(first["ok"])
+        before=self.third.read_bytes()
+        self.third.unlink()  # synthetic fixture only
+        result=self.m.gallery_scan({})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["removed_missing"],1)
+        history=self.m.TOOLS["gallery_missing_history"][1]({"limit":10})
+        self.assertEqual(history["state_counts"].get("MISSING"),1)
+        record=next(x for x in history["items"] if x["name"]=="other.png")
+        self.assertEqual(record["size"],len(before))
+        self.assertFalse(history["image_bytes_archived"])
+        self.assertFalse(history["originals_modified"])
+        self.assertFalse(any(x["name"]=="other.png" for x in
+                             self.m.gallery_list({"limit":50})["items"]))
+        # Previously absent file returns: it is again an active catalog
+        # member, but provenance never assumes the bytes are identical.
+        self.third.write_bytes(before)
+        self.assertTrue(self.m.gallery_scan({})["ok"])
+        recovered=self.m.TOOLS["gallery_missing_history"][1]({})
+        record=next(x for x in recovered["items"] if x["name"]=="other.png")
+        self.assertEqual(record["status"],"RETURNED")
+        self.assertIsNotNone(record["returned_at"])
+        self.assertEqual(recovered["state_counts"].get("RETURNED"),1)
+        self.assertTrue(any(x["name"]=="other.png" for x in
+                            self.m.gallery_list({"limit":50})["items"]))
+
+    def test_disabled_privileged_source_never_archived_as_missing(self):
+        from unittest.mock import patch
+        self.assertTrue(self.m.gallery_scan({})["ok"])
+        with self.m._db() as c:
+            c.execute("""INSERT INTO images(path,name,album,size,mtime,seen,mime)
+                         VALUES(?,?,?,?,?,?,?)""",
+                      ("shizuku:///storage/emulated/0/Android/data/example/hidden.jpg",
+                       "hidden.jpg","Android/data/example",10,100.0,0,"image/jpeg"))
+        with patch("gallery_shizuku.available_cached",return_value=False):
+            self.assertTrue(self.m.gallery_scan({})["ok"])
+        history=self.m.TOOLS["gallery_missing_history"][1]({})
+        self.assertEqual(history["state_counts"].get("MISSING",0),0)
+        with self.m._db() as c:
+            self.assertEqual(c.execute(
+                "SELECT COUNT(*) FROM images WHERE path LIKE 'shizuku://%'"
+            ).fetchone()[0],1)
+
     def test_missing_storage_preserves_index(self):
         self.m.gallery_scan({})
         self.shared.rename(self.shared.with_name("storage_offline"))
@@ -122,6 +167,8 @@ class GalleryTests(unittest.TestCase):
         result = self.m.gallery_scan({})
         self.assertFalse(result["ok"], result)
         self.assertEqual(self.m.gallery_status({})["indexed"],124)
+        history=self.m.TOOLS["gallery_missing_history"][1]({})
+        self.assertEqual(history["state_counts"].get("MISSING",0),0)
 
     def test_no_original_mutations(self):
         originals = [(p, p.read_bytes(), p.stat().st_mtime_ns)
