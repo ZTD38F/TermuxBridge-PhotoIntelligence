@@ -104,3 +104,20 @@ DISABLED, and previously indexed rows are retained, not pruned. Local
 DCIM/Pictures/Download OCR, visual and semantic indexing keep working.
 This setting does not itself grant direct Android/data byte access to Termux.
 Enable it again only if you consciously choose a different access policy.
+
+
+### Missing photo recovery audit (read-only)
+
+Use python scripts/gallery_recovery_audit.py --save-private to compare the
+latest consistent pre-v067-* SQLite snapshot against the current catalog.
+The audit reads SQLite with mode=ro, checks shared-storage metadata and
+finds likely relocations by basename + size + modification time. It never
+reads image bytes, deletes/renames photos, edits SQLite or uploads files.
+An explicit --baseline and --current can select a different snapshot pair.
+
+Detailed paths are written only to the private
+~/.termux-mcp-bridge/addons/photo-intelligence/state/forensics/
+directory with directory mode 0700 and file mode 0600. Terminal output
+reports totals, not private filenames. A probable relocation is a strong
+metadata match, not cryptographic proof of identical content.
+The tool cannot reconstruct missing originals from a SQLite index.
