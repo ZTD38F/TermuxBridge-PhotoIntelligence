@@ -171,6 +171,43 @@ class OcrTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["battery"]["level"],17)
 
+    def test_50_megapixel_jpeg_uses_decoder_draft_without_modifying_source(self):
+        import hashlib
+        import io
+        import subprocess
+        large=self.tmp/"android/Pictures/highres-camera.jpg"
+        # A generated solid-color fixture, not a user photograph.
+        im=Image.new("RGB",(6144,8192),"white")
+        im.save(large,format="JPEG",quality=75)
+        im.close()
+        before=hashlib.sha256(large.read_bytes()).hexdigest()
+        self.assertTrue(self.g.gallery_scan({})["ok"])
+        rows=self.g.gallery_list({"query":"highres-camera.jpg","limit":20})["items"]
+        self.assertEqual(len(rows),1)
+        received=[]
+        def fake_tesseract(command, *, input, capture_output, timeout, check):
+            self.assertEqual(input[:8],bytes.fromhex("89504e470d0a1a0a"))
+            with Image.open(io.BytesIO(input)) as cropped:
+                self.assertLessEqual(max(cropped.size),1800)
+                received.append(cropped.size)
+            return subprocess.CompletedProcess(command,0,b"BIG CAMERA TEST\\n",b"")
+        with patch.object(gallery_ocr,"battery_status",return_value={
+                    "available":True,"level":78,"charging":True,
+                    "temperature_c":30.0}), \
+             patch.object(gallery_ocr,"ocr_languages",return_value=["eng"]), \
+             patch.object(gallery_ocr.subprocess,"run",side_effect=fake_tesseract):
+            result=self.g.gallery_ocr_index({"ids":[rows[0]["id"]],
+                "max_images":1,"max_seconds":60,"unrestricted":True,"languages":"eng"})
+        self.assertEqual(result["recognized_ids"],[rows[0]["id"]],result)
+        self.assertEqual(len(received),1)
+        self.assertEqual(hashlib.sha256(large.read_bytes()).hexdigest(),before)
+        with Image.open(large) as again:
+            self.assertEqual(again.size,(6144,8192))
+        with self.g._db() as conn:
+            status=conn.execute("SELECT error FROM gallery_ocr_index WHERE image_id=?",
+                                (rows[0]["id"],)).fetchone()
+        self.assertIsNone(status["error"])
+
     @unittest.skipUnless(gallery_ocr.ocr_languages(), "Tesseract binary unavailable")
     def test_real_tesseract_single_photo(self):
         with patch.object(gallery_ocr,"battery_status",return_value={"available":True,"level":17,"charging":True,"temperature_c":27.0}):
