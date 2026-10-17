@@ -121,3 +121,13 @@ directory with directory mode 0700 and file mode 0600. Terminal output
 reports totals, not private filenames. A probable relocation is a strong
 metadata match, not cryptographic proof of identical content.
 The tool cannot reconstruct missing originals from a SQLite index.
+
+### Preserving missing-image history (0.6.8)
+
+Completed scans retain metadata for images removed from the active catalog
+in the private SQLite gallery_missing_history table before pruning. The
+read-only gallery_missing_history MCP tool shows historical missing paths,
+counts and paths that later reappeared (RETURNED is not proof of identical
+bytes). Shizuku/Android/data virtual rows are never pruned or marked missing
+unless that source was actually scanned successfully. No image originals are
+modified; old historical paths before installation remain in prior snapshots.
