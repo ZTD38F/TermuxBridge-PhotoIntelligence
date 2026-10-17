@@ -62,6 +62,20 @@ def install(g: dict[str, Any]) -> None:
           FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE
         )""")
         c.execute("CREATE INDEX IF NOT EXISTS gallery_extra_hash_idx ON gallery_extra(sha256)")
+        # Historical metadata must survive active-index pruning. This is
+        # intentionally not a copy of the image bytes and not a new media
+        # source. Rows live only in private SQLite and are never auto-purged.
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS gallery_missing_history (
+          path TEXT PRIMARY KEY, image_id INTEGER NOT NULL,
+          name TEXT NOT NULL, album TEXT NOT NULL,
+          size INTEGER NOT NULL, mtime REAL NOT NULL,
+          first_missing_at REAL NOT NULL, last_missing_at REAL NOT NULL,
+          occurrences INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'MISSING',
+          returned_at REAL
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS gallery_missing_state_idx ON gallery_missing_history(status)")
         c.execute("CREATE TABLE IF NOT EXISTS gallery_audit (id INTEGER PRIMARY KEY, started REAL NOT NULL, "
                   "finished REAL NOT NULL, scanned INTEGER NOT NULL, removed INTEGER NOT NULL, "
                   "errors INTEGER NOT NULL, success INTEGER NOT NULL)")
@@ -125,7 +139,9 @@ def install(g: dict[str, Any]) -> None:
                         err(exc)
 
             shizuku_count = 0
-            shizuku_deferred = False
+            # Default to NOT available. Custom shared roots do not imply
+            # Android/data is accessible or that virtual rows may be purged.
+            shizuku_deferred = True
             if root == Path("/storage/emulated/0").resolve():
                 if gallery_shizuku.available_cached(ttl=30.0):
                     try:
@@ -137,6 +153,7 @@ def install(g: dict[str, Any]) -> None:
                             candidates.append((virtual, p.name, album, int(size), float(mtime), stamp,
                                                g["MIME_BY_EXT"].get(p.suffix.lower())))
                             shizuku_count += 1
+                        shizuku_deferred = False
                     except gallery_shizuku.ShizukuUnavailable:
                         shizuku_deferred = True
                 else:
@@ -165,10 +182,42 @@ def install(g: dict[str, Any]) -> None:
                                   THEN NULL ELSE images.height END
                 """, candidates)
                 if not errors:
-                    if shizuku_deferred:
-                        removed = c.execute("DELETE FROM images WHERE seen<>? AND path NOT LIKE 'shizuku://%'", (stamp,)).rowcount
-                    else:
-                        removed = c.execute("DELETE FROM images WHERE seen<>?", (stamp,)).rowcount
+                    # Record all missing metadata transactionally BEFORE
+                    # pruning active rows; protected virtual records stay
+                    # untouched while the source is unavailable.
+                    clause = ("seen<>? AND path NOT LIKE 'shizuku://%'"
+                              if shizuku_deferred else "seen<>?")
+                    missing = c.execute(
+                        "SELECT id,path,name,album,size,mtime FROM images WHERE "+clause,
+                        (stamp,)).fetchall()
+                    when = time.time()
+                    c.executemany("""
+                        INSERT INTO gallery_missing_history(
+                          path,image_id,name,album,size,mtime,first_missing_at,
+                          last_missing_at,occurrences,status,returned_at)
+                        VALUES (?,?,?,?,?,?,?, ?,1,'MISSING',NULL)
+                        ON CONFLICT(path) DO UPDATE SET
+                          image_id=excluded.image_id,
+                          name=excluded.name,album=excluded.album,
+                          size=excluded.size,mtime=excluded.mtime,
+                          first_missing_at=CASE WHEN gallery_missing_history.status='RETURNED'
+                             THEN excluded.first_missing_at
+                             ELSE gallery_missing_history.first_missing_at END,
+                          last_missing_at=excluded.last_missing_at,
+                          occurrences=gallery_missing_history.occurrences+1,
+                          status='MISSING',returned_at=NULL
+                    """, [(r["path"],r["id"],r["name"],r["album"],
+                           r["size"],r["mtime"],when,when) for r in missing])
+                    # A previously missing path is present again, but this
+                    # is not proof that the file bytes are unchanged.
+                    c.execute("""
+                        UPDATE gallery_missing_history
+                        SET status='RETURNED',returned_at=?
+                        WHERE status='MISSING'
+                          AND path IN (SELECT path FROM images WHERE seen=?)
+                    """,(when,stamp))
+                    removed=c.execute(
+                        "DELETE FROM images WHERE "+clause,(stamp,)).rowcount
                     c.execute("DELETE FROM gallery_extra WHERE image_id NOT IN (SELECT id FROM images)")
                 c.execute("INSERT INTO meta(key,value) VALUES('last_scan',?) "
                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(time.time()),))
@@ -183,6 +232,23 @@ def install(g: dict[str, Any]) -> None:
                     "seconds": round(time.time()-start,2), "photos_modified": False, "engine": VERSION,
                     "shizuku_android_data_images": shizuku_count,
                     "deferred_sources": ["android_data_shizuku"] if shizuku_deferred else []}
+
+    def missing_history(args: dict[str, Any]) -> dict[str, Any]:
+        limit = max(0, min(100, int(args.get("limit",20))))
+        with db() as c:
+            _extras(c)
+            counts = {str(r[0]): int(r[1]) for r in c.execute(
+                "SELECT status,COUNT(*) FROM gallery_missing_history GROUP BY status")}
+            rows = c.execute("""
+                SELECT path,name,album,size,mtime,first_missing_at,
+                       last_missing_at,occurrences,status,returned_at
+                FROM gallery_missing_history
+                ORDER BY last_missing_at DESC LIMIT ?
+            """,(limit,)).fetchall()
+        return {"ok":True,"state_counts":counts,
+                "items":[dict(r) for r in rows],
+                "originals_modified":False,"image_bytes_archived":False,
+                "note":"MISSING means absent during complete scan; RETURNED means path reappeared, not proof of identical content."}
 
     def _row(photo_id: int) -> sqlite3.Row:
         with db() as c:
@@ -350,6 +416,13 @@ def install(g: dict[str, Any]) -> None:
         "ids":{"type":"array","items":{"type":"integer","minimum":1},"minItems":1,"maxItems":64},
         "threshold":{"type":"integer","minimum":0,"maximum":64}
     },["ids"]),similar)
+    tools["gallery_missing_history"] = (schema({
+        "limit":{"type":"integer","minimum":0,"maximum":100}
+    }),missing_history)
+    descriptions["gallery_missing_history"] = (
+        "Review persisted metadata of paths removed from active catalog, "
+        "and reappeared paths. Read-only, no image bytes archived.")
+    readonly.add("gallery_missing_history")
     descriptions.update({
       "gallery_search":"Search local image metadata. Does not claim visual semantic or OCR search.",
       "gallery_metadata":"Read actual original image dimensions and limited EXIF date; excludes GPS.",
