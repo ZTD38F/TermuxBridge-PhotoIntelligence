@@ -71,6 +71,7 @@ class ReviewTests(unittest.TestCase):
         r=self.get(album="Давид")
         self.assertFalse(r["reference_album_visible"])
         self.assertFalse(r["album_membership_known"])
+        self.assertIsNone(r["reference_album_indexed_count"])
         self.assertEqual(r["candidate_count"],4)
         self.assertTrue(r["not_verified_same_person"])
 

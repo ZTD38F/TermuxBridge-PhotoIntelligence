@@ -131,7 +131,7 @@ def candidates(db_path: Path, *, album: str = "", manifest: set[str] | None = No
         "not_verified_same_person": True,
         "reference_album": album or None,
         "reference_album_visible": album in present_albums if album else False,
-        "reference_album_indexed_count": present_albums.get(album, 0) if album else None,
+        "reference_album_indexed_count": present_albums.get(album) if album else None,
         "album_membership_known": bool(confirmed_paths or (album and album in present_albums)),
         "manifest_exact_paths": len(confirmed_paths),
         "manifest_fingerprint": hashlib.sha256(
