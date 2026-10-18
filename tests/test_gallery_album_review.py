@@ -75,6 +75,12 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(r["candidate_count"],4)
         self.assertTrue(r["not_verified_same_person"])
 
+    def test_unknown_album_prominent_warning(self):
+        page=review.render_html(self.get(album="Давид"),page=1,page_size=10)
+        self.assertIn("ни один его снимок не исключён",page)
+        known=review.render_html(self.get(album="My album"),page=1,page_size=10)
+        self.assertNotIn("ни один его снимок не исключён",known)
+
     def test_manifest_matches_paths_not_basename(self):
         r=self.get(manifest={"Camera/p1.jpg"})
         self.assertEqual(r["candidate_count"],3)
