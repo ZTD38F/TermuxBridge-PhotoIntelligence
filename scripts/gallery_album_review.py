@@ -15,9 +15,161 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 
 
 NOISE = ("stickers", ".thumbnails", "gif_preview_cache")
+VALID_REVIEWS = frozenset(("mine", "other", "in_album"))
+MAX_HASH_BYTES = 512 * 1024 * 1024
+MAX_SINGLE_FILE = 128 * 1024 * 1024
+
+
+def review_scope(album: str, manifest_fingerprint: str) -> str:
+    digest = hashlib.sha256(
+        ((album or "[no-album]") + "|" + manifest_fingerprint).encode("utf-8")
+    ).hexdigest()[:16]
+    return "photo-review-v1:" + digest
+
+
+def read_reviews(path: Path, scope: str) -> dict[int,str]:
+    """Only manually submitted decisions; reject cross-album/stale exports."""
+    if path.stat().st_size > 5 * 1024 * 1024:
+        raise ValueError("review file too large")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(data,dict) or data.get("schema")!=1
+        or data.get("kind")!="manual-photo-review"
+        or data.get("scope")!=scope
+        or not isinstance(data.get("decisions"),dict)
+        or len(data["decisions"])>50000):
+        raise ValueError("review format or album scope mismatch; re-export latest review")
+    result={}
+    for key, val in data["decisions"].items():
+        if (not isinstance(key,str) or not key.isdecimal()
+            or int(key)<1 or int(key)>2**63-1
+            or not isinstance(val,dict)
+            or val.get("decision") not in VALID_REVIEWS):
+            raise ValueError("invalid review decision")
+        result[int(key)]=val["decision"]
+    return result
+
+
+def _safe_local_path(root: Path, relative: str) -> Path | None:
+    if (not isinstance(relative,str) or not relative
+        or relative.startswith("/") or "\x00" in relative
+        or any(x in ("",".","..") for x in relative.split("/"))):
+        return None
+    try:
+        candidate=root/relative
+        if not candidate.resolve(strict=False).is_relative_to(root):
+            return None
+        return candidate
+    except OSError:
+        return None
+
+
+def _sha256_file(root: Path, rel: str, size: int, mtime: float) -> str | None:
+    """Exact byte digest only, guarded path, max size, read-only descriptor."""
+    if size<=0 or size>MAX_SINGLE_FILE:
+        return None
+    path=_safe_local_path(root,rel)
+    if path is None:
+        return None
+    try:
+        fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+        try:
+            initial=os.fstat(fd)
+            if (not stat.S_ISREG(initial.st_mode) or initial.st_size!=size
+                or abs(initial.st_mtime-mtime)>3):
+                return None
+            digest=hashlib.sha256()
+            remaining=size
+            while remaining:
+                chunk=os.read(fd,min(1024*1024,remaining))
+                if not chunk:return None
+                digest.update(chunk);remaining-=len(chunk)
+            final=os.fstat(fd)
+            if (final.st_size!=initial.st_size
+                or final.st_mtime_ns!=initial.st_mtime_ns):
+                return None
+            return digest.hexdigest()
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+
+
+def annotate_exact_copies(report:dict, db_path:Path, decisions:dict[int,str],
+                          root:Path=Path("/storage/emulated/0")) -> dict:
+    """Find EXACT copies of previously reviewed images, not similar faces."""
+    output=dict(report)
+    output["reviewed_decisions"]=dict(decisions)
+    output["exact_file_copies"]={}
+    output["feedback_stats"]={"manual_decisions":len(decisions),
+                              "usable_references":0,"byte_verified_copies":0,
+                              "hash_bytes_read":0,"hash_budget_exhausted":False,
+                              "identity_model_trained":False}
+    if not decisions:return output
+    root=root.resolve(strict=True)
+    c=sqlite3.connect(f"file:{db_path.resolve(strict=True)}?mode=ro",
+                      uri=True,timeout=8)
+    c.row_factory=sqlite3.Row
+    c.execute("PRAGMA query_only=ON")
+    try:
+        refs={}
+        for i in decisions:
+            r=c.execute("SELECT id,path,size,mtime FROM images WHERE id=?"
+                        " AND path NOT LIKE 'shizuku://%'",(i,)).fetchone()
+            if r:refs[i]=r
+        needed={r["size"] for r in refs.values()
+                if 0<int(r["size"])<=MAX_SINGLE_FILE}
+        if not needed:return output
+        refs_by_digest={}
+        spent=0
+        for i,r in refs.items():
+            size=int(r["size"])
+            if size not in needed or spent+size>MAX_HASH_BYTES:
+                output["feedback_stats"]["hash_budget_exhausted"]=True
+                continue
+            h=_sha256_file(root,r["path"],size,float(r["mtime"]))
+            spent+=size
+            if h:
+                refs_by_digest.setdefault((size,h),[]).append(
+                    (i,decisions[i]))
+        output["feedback_stats"]["usable_references"]=sum(
+            len(x) for x in refs_by_digest.values())
+        if not refs_by_digest:
+            output["feedback_stats"]["hash_bytes_read"]=spent
+            return output
+        ids={x["id"] for x in report["candidates"]}
+        # All candidates still require exact byte equality; size alone
+        # NEVER transfers any label.
+        for r in c.execute("SELECT id,path,size,mtime FROM images"
+                           " WHERE path NOT LIKE 'shizuku://%'"):
+            if r["id"] not in ids or r["id"] in decisions:
+                continue
+            size=int(r["size"])
+            if size not in needed:
+                continue
+            if spent+size>MAX_HASH_BYTES:
+                output["feedback_stats"]["hash_budget_exhausted"]=True
+                break
+            h=_sha256_file(root,r["path"],size,float(r["mtime"]))
+            spent+=size
+            matches=[(i,decision) for i,decision in
+                     refs_by_digest.get((size,h),[]) if i!=r["id"]]
+            if not matches:continue
+            output["exact_file_copies"][int(r["id"])]={
+                "same_bytes_as_reviewed_photo_ids":[i for i,_ in matches],
+                "manual_review_decisions":list(sorted({x for _,x in matches})),
+                "same_image_bytes":True,
+                "person_identity_inferred":False,
+            }
+        output["feedback_stats"]["hash_bytes_read"]=spent
+        output["feedback_stats"]["byte_verified_copies"]=len(
+            output["exact_file_copies"])
+        return output
+    finally:
+        c.close()
 
 
 def load_manifest(path: Path | None) -> set[str]:
@@ -137,6 +289,10 @@ def candidates(db_path: Path, *, album: str = "", manifest: set[str] | None = No
         "manifest_fingerprint": hashlib.sha256(
             "\n".join(sorted(confirmed_paths)).encode("utf-8")
         ).hexdigest()[:16],
+        "review_scope": review_scope(
+            album,hashlib.sha256(
+                "\n".join(sorted(confirmed_paths)).encode("utf-8")
+            ).hexdigest()[:16]),
         "all_indexed": total_indexed,
         "local_indexed": local_indexed,
         "taxonomy_indexed_local": len(rows),
@@ -187,22 +343,24 @@ def render_html(report: dict, *, page: int, page_size: int) -> str:
     # reviewing the complete candidate set in a single offline document.
     dataset = json.dumps([
         {"id":int(x["id"]), "album":x["album"], "name":x["name"],
-         "score":float(x["person_photo_score"])}
+         "score":float(x["person_photo_score"]),
+         "duplicate_review":report.get("exact_file_copies",{}).get(int(x["id"]))}
         for x in report["candidates"]
     ],ensure_ascii=True,separators=(",",":"))
     dataset = (dataset.replace("&",r"\u0026").replace("<",r"\u003c")
               .replace(">",r"\u003e"))
-    scope = hashlib.sha256(
-        ((report.get("reference_album") or "[no-album]")
-         + "|" + report.get("manifest_fingerprint","")).encode("utf-8")
-    ).hexdigest()[:16]
+    scope = report["review_scope"].split(":")[-1]
     script = """<script>
 const ALL = __REVIEW_DATA__;
 const PAGE_SIZE = __REVIEW_PAGE_SIZE__;
 let currentPage = __REVIEW_PAGE_NUMBER__;
 const KEY = 'photo-review-v1:__REVIEW_SCOPE__';
+const PRIOR_REVIEWS = __PRIOR_REVIEWS__;
 let choices = {};
 try { choices = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) {}
+for (const [id,decision] of Object.entries(PRIOR_REVIEWS)) {
+  if (!choices[id]) choices[id]={decision,reviewed_at:'imported from export'};
+}
 function redraw() {
   document.querySelectorAll('article[data-id]').forEach(card => {
     const state = choices[card.dataset.id]?.decision || '';
@@ -217,7 +375,7 @@ function mark(id, decision) {
 }
 function exportReviews() {
   const payload = JSON.stringify({schema:1,kind:'manual-photo-review',
-      decisions:choices, verified_identity_by_model:false},null,2);
+      scope:KEY,decisions:choices, verified_identity_by_model:false},null,2);
   const a = document.createElement('a');
   const url = URL.createObjectURL(new Blob([payload],{type:'application/json'}));
   a.href=url; a.download='photo-review-selections.json';a.click();
@@ -227,7 +385,8 @@ function importReviews(input) {
   if (!input.files?.[0])return;
   const r = new FileReader();r.onload=()=>{
     try {const x=JSON.parse(r.result);
-      if(x.schema!==1||!x.decisions||typeof x.decisions!=='object')throw Error('format');
+      if(x.schema!==1||x.scope!==KEY||
+          !x.decisions||typeof x.decisions!=='object')throw Error('scope/format');
       const allowed=['mine','other','in_album'];
       for(const [id,v] of Object.entries(x.decisions)) {
         if(!/^[0-9]+$/.test(id)||!allowed.includes(v?.decision))continue;
@@ -259,7 +418,15 @@ function populatePage() {
     const title=document.createElement('b');title.textContent='№ '+item.id+' · '+item.album;
     const desc=document.createElement('p');
     desc.textContent=item.name+' · метка '+item.score.toFixed(2);
-    caption.append(title,desc);card.appendChild(caption);
+    caption.append(title,desc);
+    if (item.duplicate_review?.same_image_bytes) {
+      const note=document.createElement('p');note.className='exact-copy';
+      note.textContent='🔁 Точная копия ранее отмеченного изображения №'+
+        item.duplicate_review.same_bytes_as_reviewed_photo_ids.join(', ')+
+        ' — не распознавание лица';
+      caption.appendChild(note);
+    }
+    card.appendChild(caption);
     const buttons=document.createElement('div');buttons.className='buttons';
     for (const [label,code] of [['✅ Это я','mine'],['Не я','other'],['В альбоме','in_album']]) {
       const button=document.createElement('button');button.textContent=label;
@@ -279,7 +446,10 @@ window.addEventListener('DOMContentLoaded',populatePage);
     script=(script.replace("__REVIEW_DATA__",dataset)
                   .replace("__REVIEW_PAGE_SIZE__",str(page_size))
                   .replace("__REVIEW_PAGE_NUMBER__",str(page))
-                  .replace("__REVIEW_SCOPE__",scope))
+                  .replace("__REVIEW_SCOPE__",scope)
+                  .replace("__PRIOR_REVIEWS__",json.dumps(
+                      {str(k):v for k,v in report.get("reviewed_decisions",{}).items()},
+                      separators=(",",":"))))
     style = """<style>
 body{font-family:system-ui,sans-serif;background:#13171e;color:#f4f5f6;margin:0;padding:18px}
 h1{font-size:1.25rem}.note{max-width:1100px;line-height:1.5;color:#c3cbd7}
@@ -292,6 +462,7 @@ button,.action{cursor:pointer;border:1px solid #718095;border-radius:7px;backgro
 .buttons{display:flex;gap:3px;flex-wrap:wrap}.buttons button{font-size:.72rem;padding:6px}
 .tile[data-decision=mine]{outline:3px solid #30b89e}
 .tile[data-decision=other]{opacity:.55}.tile[data-decision=in_album]{outline:3px solid #d9aa3e}
+.exact-copy{color:#66dfad;font-weight:bold}
 </style>"""
     return (
         '<!doctype html><html lang="ru"><meta charset="utf-8">'
@@ -322,6 +493,8 @@ def main() -> int:
     ap.add_argument("--exclude-manifest",type=Path,
                     help='JSON {"paths": ["relative/image.jpg", ...]} of exact album members')
     ap.add_argument("--min-score",type=float,default=0.19)
+    ap.add_argument("--reviews",type=Path,
+                    help="Your manual-review JSON export; verify scope and exact file copies")
     ap.add_argument("--include-noise",action="store_true",help="include stickers/thumbnails")
     ap.add_argument("--page",type=int,default=1)
     ap.add_argument("--page-size",type=int,default=96)
@@ -330,6 +503,9 @@ def main() -> int:
     report=candidates(opts.database,album=opts.exclude_album,
                       manifest=load_manifest(opts.exclude_manifest),
                       min_score=opts.min_score,include_noise=opts.include_noise)
+    if opts.reviews is not None:
+        previous=read_reviews(opts.reviews,report["review_scope"])
+        report=annotate_exact_copies(report,opts.database,previous)
     if not 1 <= opts.page_size <= 200 or opts.page < 1:
         ap.error("invalid page options")
     output=opts.output_dir
@@ -352,7 +528,12 @@ def main() -> int:
         "album_membership_known":report["album_membership_known"],
         "reference_album_indexed_count":report["reference_album_indexed_count"],
         "photos_modified":False,"identity_matched":False,
-        "original_image_bytes_saved":False,"source_photos_opened":False,
+        "original_image_bytes_saved":False,
+        "source_photos_opened": bool(opts.reviews and
+                                   report.get("feedback_stats",{}).get("hash_bytes_read",0)),
+        "reviewed_decisions":len(report.get("reviewed_decisions",{})),
+        "exact_duplicate_candidates":len(report.get("exact_file_copies",{})),
+        "biometric_identification":False,
     },ensure_ascii=False))
     return 0
 

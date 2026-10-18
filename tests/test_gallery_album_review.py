@@ -121,6 +121,86 @@ class ReviewTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 review.render_html(r,page=p,page_size=10)
 
+    def _extra_image(self, image_id, relative, content):
+        path=self.images/relative
+        path.write_bytes(content)
+        info=path.stat()
+        db=sqlite3.connect(self.db)
+        db.execute("INSERT INTO images VALUES(?,?,?,?,?,?,?)",
+            (image_id,relative,path.name,str(path.parent.relative_to(self.images)),
+             len(content),info.st_mtime,1))
+        db.execute("INSERT INTO gallery_taxonomy VALUES(?,?,?,?)",
+            (image_id,len(content),info.st_mtime,
+             json.dumps([{"label":"person","score":0.42}])))
+        db.commit();db.close()
+        return path
+
+    def test_exact_copy_of_user_marked_image_not_face_identity(self):
+        twin=self._extra_image(7,"Camera/copy.jpg",b"abc")
+        other=self._extra_image(8,"Camera/same-size-different.jpg",b"xyz")
+        report=self.get()
+        result=review.annotate_exact_copies(
+            report,self.db,{1:"mine"},root=self.images)
+        self.assertEqual(result["feedback_stats"]["manual_decisions"],1)
+        self.assertEqual(result["feedback_stats"]["usable_references"],1)
+        self.assertEqual(result["feedback_stats"]["byte_verified_copies"],1)
+        self.assertIn(7,result["exact_file_copies"])
+        self.assertNotIn(8,result["exact_file_copies"])
+        self.assertFalse(result["exact_file_copies"][7]["person_identity_inferred"])
+        self.assertEqual(result["exact_file_copies"][7]["manual_review_decisions"],["mine"])
+        self.assertEqual(twin.read_bytes(),b"abc")
+        self.assertEqual(other.read_bytes(),b"xyz")
+        markup=review.render_html(result,page=1,page_size=12)
+        self.assertIn("Точная копия ранее отмеченного изображения",markup)
+
+    def test_read_review_export_exact_scope_and_validate(self):
+        r=self.get(album="My album")
+        manifest={"schema":1,"kind":"manual-photo-review","scope":r["review_scope"],
+            "decisions":{"1":{"decision":"mine","reviewed_at":"2026-10-18T00:00:00Z"},
+                         "2":{"decision":"other"}}}
+        p=self.root/"review.json"
+        p.write_text(json.dumps(manifest))
+        self.assertEqual(review.read_reviews(p,r["review_scope"]),{1:"mine",2:"other"})
+        with self.assertRaisesRegex(ValueError,"scope mismatch"):
+            review.read_reviews(p,self.get(album="Давид")["review_scope"])
+        manifest["decisions"]["2"]["decision"]="my face recognized"
+        p.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError,"invalid review decision"):
+            review.read_reviews(p,r["review_scope"])
+
+    def test_mismatched_source_metadata_not_promoted(self):
+        copy=self._extra_image(7,"Camera/copy.jpg",b"abc")
+        old=self.get()
+        (self.images/"Camera/p1.jpg").write_bytes(b"stale")
+        # Source changed since index. Matching the new data may not assign
+        # labels from the old review to any target.
+        after=review.annotate_exact_copies(old,self.db,{1:"mine"},root=self.images)
+        self.assertEqual(after["feedback_stats"]["usable_references"],0)
+        self.assertEqual(after["feedback_stats"]["byte_verified_copies"],0)
+        self.assertEqual(copy.read_bytes(),b"abc")
+
+    def test_unavailable_review_id_cannot_trigger_matching(self):
+        report=self.get()
+        result=review.annotate_exact_copies(report,self.db,{999999:"mine"},root=self.images)
+        self.assertEqual(result["feedback_stats"]["usable_references"],0)
+        self.assertEqual(result["exact_file_copies"],{})
+
+    def test_same_file_marked_from_different_album_not_auto_reviewed(self):
+        copy=self._extra_image(7,"Camera/copy.jpg",b"56789")
+        r=self.get(album="My album")
+        result=review.annotate_exact_copies(r,self.db,{3:"in_album"},root=self.images)
+        self.assertIn(7,result["exact_file_copies"])
+        self.assertNotIn(7,result["reviewed_decisions"])
+        self.assertEqual(result["exact_file_copies"][7]["manual_review_decisions"],["in_album"])
+        self.assertTrue(copy.exists())
+
+    def test_manually_exported_scope_embedded_in_html(self):
+        r=self.get(album="My album")
+        page=review.render_html(r,page=1,page_size=10)
+        self.assertIn(f"const KEY = '{r['review_scope']}'",page)
+        self.assertIn("scope:KEY,decisions:choices",page)
+        self.assertIn("x.scope!==KEY",page)
+
     def test_no_original_or_database_modification(self):
         before=self.db.read_bytes()
         files={str(p):p.read_bytes() for p in self.images.rglob("*.jpg")}
