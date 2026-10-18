@@ -164,3 +164,23 @@ a missing album never silently counts as excluded.
 Protected Android/data images are omitted when not readable by ordinary
 Termux UID. Generic taxonomy is approximate and only covers previously
 indexed accessible photos. This tool does not perform face recognition.
+
+### Manual-feedback reuse and exact-copy hints (standalone optional tool)
+
+Review decisions exported from the local HTML can be fed back without
+uploading photos via gallery-album-review --reviews /path/to/photo-review-selections.json.
+The export includes a per-album review scope to prevent cross-album labels
+from being accepted inadvertently. The tool uses at most 512 MiB of
+bounded read-only SHA-256 hashing and never copies source photo bytes
+into its report. Only identical file bytes produce a duplicate-review hint;
+equal size, filename, metadata, a similar face or CLIP proximity can never
+transfer a review decision. It does not train any face-recognition model or
+infer identity.
+
+HTML retains manual review decisions in browser-local storage, and can
+export them to JSON. Until user-reviewed decisions are exported, no
+confirmed identity training data exist; the tool remains a generic
+human-content review without learned identity. The --reviews flag is
+opt-in and requires an exact matching review scope. Exact same file
+bytes are explicitly distinguished from same person's face.
+Existing addon runtime, gallery DB and photo files are unchanged.
