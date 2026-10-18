@@ -70,6 +70,7 @@ class ReviewTests(unittest.TestCase):
     def test_cloud_album_name_does_not_falsely_exclude(self):
         r=self.get(album="Давид")
         self.assertFalse(r["reference_album_visible"])
+        self.assertFalse(r["album_membership_known"])
         self.assertEqual(r["candidate_count"],4)
         self.assertTrue(r["not_verified_same_person"])
 
