@@ -201,6 +201,50 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("scope:KEY,decisions:choices",page)
         self.assertIn("x.scope!==KEY",page)
 
+    def test_auto_import_latest_scoped_export_and_ignore_invalid(self):
+        dl=self.root/"Download"
+        dl.mkdir()
+        scope=self.get(album="My album")["review_scope"]
+        correct={"schema":1,"kind":"manual-photo-review","scope":scope,
+                 "decisions":{"1":{"decision":"mine"}}}
+        wrong=dict(correct,scope="photo-review-v1:anotheralbum")
+        previous=dl/"photo-review-selections.json"
+        previous.write_text(json.dumps(correct))
+        newest=dl/"photo-review-selections (2).json"
+        newest.write_text(json.dumps(wrong))
+        path,decisions=review.find_exported_reviews(dl,scope)
+        self.assertEqual(path,previous)
+        self.assertEqual(decisions,{1:"mine"})
+        newest.write_text(json.dumps(correct))
+        import os
+        os.utime(previous,ns=(1000000000000000000,1000000000000000000))
+        os.utime(newest,ns=(2000000000000000000,2000000000000000000))
+        path,decisions=review.find_exported_reviews(dl,scope)
+        self.assertEqual(path,newest)
+        self.assertEqual(decisions,{1:"mine"})
+
+    def test_auto_export_symlink_denied_and_empty_safely(self):
+        dl=self.root/"Download"
+        dl.mkdir()
+        scope=self.get()["review_scope"]
+        target=self.root/"secret.json"
+        target.write_text(json.dumps({"schema":1,"kind":"manual-photo-review",
+                                       "scope":scope,"decisions":{"1":{"decision":"mine"}}}))
+        (dl/"photo-review-selections.json").symlink_to(target)
+        path,decisions=review.find_exported_reviews(dl,scope)
+        self.assertIsNone(path)
+        self.assertEqual(decisions,{})
+        path,decisions=review.find_exported_reviews(self.root/"no-download",scope)
+        self.assertIsNone(path)
+
+    def test_reject_corrupted_and_oversized_auto_exports(self):
+        dl=self.root/"Download"
+        dl.mkdir()
+        (dl/"photo-review-selections.json").write_text("nope")
+        (dl/"photo-review-selections (1).json").write_bytes(b"x"*(5*1024*1024+1))
+        path,_=review.find_exported_reviews(dl,self.get()["review_scope"])
+        self.assertIsNone(path)
+
     def test_no_original_or_database_modification(self):
         before=self.db.read_bytes()
         files={str(p):p.read_bytes() for p in self.images.rglob("*.jpg")}

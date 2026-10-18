@@ -184,3 +184,17 @@ human-content review without learned identity. The --reviews flag is
 opt-in and requires an exact matching review scope. Exact same file
 bytes are explicitly distinguished from same person's face.
 Existing addon runtime, gallery DB and photo files are unchanged.
+
+
+### Automatic import of user-reviewed exports
+
+By default the standalone gallery-album-review tool looks only for
+photo-review-selections*.json directly in shared Download, choosing the
+newest export with a valid schema and the exact matching local album scope.
+This enables the next run to reuse manual decisions without typing the
+file path. It never scans private Android/data, uses external apps, assigns
+identity to unknown faces, uploads photos or automatically moves files.
+--reviews sets an explicit export path and --no-auto-reviews disables
+shared-Download discovery. All imported decisions remain human-reviewed,
+and only byte-for-byte copies are suggested automatically. With no valid
+export there is no trained facial identity and no matching outcome.

@@ -53,6 +53,37 @@ def read_reviews(path: Path, scope: str) -> dict[int,str]:
     return result
 
 
+def find_exported_reviews(download_dir: Path, scope: str
+                          ) -> tuple[Path | None, dict[int,str]]:
+    """Find newest valid manual export, only from immediate Download children."""
+    if not download_dir.is_dir():
+        return None, {}
+    files=[]
+    try:
+        with os.scandir(download_dir) as entries:
+            for entry in entries:
+                if (not entry.name.startswith("photo-review-selections")
+                    or not entry.name.endswith(".json")
+                    or entry.is_symlink() or not entry.is_file(follow_symlinks=False)):
+                    continue
+                try:
+                    size=entry.stat(follow_symlinks=False).st_size
+                    if 0 < size <= 5 * 1024 * 1024:
+                        files.append((entry.stat(follow_symlinks=False).st_mtime_ns,
+                                      Path(entry.path)))
+                except OSError:
+                    continue
+    except OSError:
+        return None, {}
+    for _,path in sorted(files,reverse=True)[:50]:
+        try:
+            reviewed=read_reviews(path,scope)
+            return path,reviewed
+        except (OSError,ValueError,TypeError):
+            continue
+    return None, {}
+
+
 def _safe_local_path(root: Path, relative: str) -> Path | None:
     if (not isinstance(relative,str) or not relative
         or relative.startswith("/") or "\x00" in relative
@@ -495,6 +526,8 @@ def main() -> int:
     ap.add_argument("--min-score",type=float,default=0.19)
     ap.add_argument("--reviews",type=Path,
                     help="Your manual-review JSON export; verify scope and exact file copies")
+    ap.add_argument("--no-auto-reviews",action="store_true",
+                    help="Do not inspect latest exported review JSON in shared Download")
     ap.add_argument("--include-noise",action="store_true",help="include stickers/thumbnails")
     ap.add_argument("--page",type=int,default=1)
     ap.add_argument("--page-size",type=int,default=96)
@@ -503,9 +536,16 @@ def main() -> int:
     report=candidates(opts.database,album=opts.exclude_album,
                       manifest=load_manifest(opts.exclude_manifest),
                       min_score=opts.min_score,include_noise=opts.include_noise)
-    if opts.reviews is not None:
-        previous=read_reviews(opts.reviews,report["review_scope"])
-        report=annotate_exact_copies(report,opts.database,previous)
+    reviewed_path=opts.reviews
+    if reviewed_path is None and not opts.no_auto_reviews:
+        reviewed_path,found_reviews=find_exported_reviews(
+            Path("/storage/emulated/0/Download"),report["review_scope"])
+    elif reviewed_path is not None:
+        found_reviews=read_reviews(reviewed_path,report["review_scope"])
+    else:
+        found_reviews={}
+    if reviewed_path is not None:
+        report=annotate_exact_copies(report,opts.database,found_reviews)
     if not 1 <= opts.page_size <= 200 or opts.page < 1:
         ap.error("invalid page options")
     output=opts.output_dir
@@ -529,8 +569,9 @@ def main() -> int:
         "reference_album_indexed_count":report["reference_album_indexed_count"],
         "photos_modified":False,"identity_matched":False,
         "original_image_bytes_saved":False,
-        "source_photos_opened": bool(opts.reviews and
+        "source_photos_opened": bool(reviewed_path and
                                    report.get("feedback_stats",{}).get("hash_bytes_read",0)),
+        "review_export_loaded":reviewed_path is not None,
         "reviewed_decisions":len(report.get("reviewed_decisions",{})),
         "exact_duplicate_candidates":len(report.get("exact_file_copies",{})),
         "biometric_identification":False,
