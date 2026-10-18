@@ -131,3 +131,14 @@ counts and paths that later reappeared (RETURNED is not proof of identical
 bytes). Shizuku/Android/data virtual rows are never pruned or marked missing
 unless that source was actually scanned successfully. No image originals are
 modified; old historical paths before installation remain in prior snapshots.
+
+
+### High-resolution JPEG OCR (0.6.9)
+
+50-64 MP camera JPEGs must be downscaled by Pillow JPEG decoder draft mode
+before full bitmap decoding, then resized to max 1800x1800 for Tesseract.
+Earlier versions rejected all JPEGs exceeding 45 million pixels and stored
+ValueError without any text recognition. Decoder-level IDCT downscaling
+avoids a 150+ MB full-resolution bitmap for typical 50 MP phone images.
+Unsupported high-resolution formats still fail closed under the existing
+pixel/memory guard. User originals remain unmodified.
