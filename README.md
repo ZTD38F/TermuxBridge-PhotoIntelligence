@@ -142,3 +142,25 @@ ValueError without any text recognition. Decoder-level IDCT downscaling
 avoids a 150+ MB full-resolution bitmap for typical 50 MP phone images.
 Unsupported high-resolution formats still fail closed under the existing
 pixel/memory guard. User originals remain unmodified.
+
+### Offline person-photo album review (no face identity matching)
+
+Use python scripts/gallery_album_review.py to build one local HTML report
+with paginated generic person/people visual-tag candidates. The report
+shows miniatures fetched exclusively from the already-running localhost
+PhotoIntelligence /api/thumb endpoint; no original image pixels are embedded
+in HTML or transmitted to any remote service. User can manually mark
+"This is me", "Not me", "Already in album", export JSON decisions,
+and import them later. No automatic gallery modifications.
+
+For an existing local folder explicitly confirmed by user to correspond to
+the album, pass --exclude-album 'Pictures/Gallery/owner/Я'.
+This is an example folder, NOT a verified alias for the album "Давид".
+For cloud albums, --exclude-manifest accepts an explicit trusted JSON
+{"paths":["DCIM/Camera/example.jpg"]} with exact relative paths.
+Never match by basename alone: different photos often share names.
+Reports declare reference_album_visible and album_membership_known;
+a missing album never silently counts as excluded.
+Protected Android/data images are omitted when not readable by ordinary
+Termux UID. Generic taxonomy is approximate and only covers previously
+indexed accessible photos. This tool does not perform face recognition.
