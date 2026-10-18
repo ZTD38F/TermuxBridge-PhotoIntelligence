@@ -305,6 +305,7 @@ def candidates(db_path: Path, *, album: str = "", manifest: set[str] | None = No
         results.append({
             "id": row["id"], "path": row["path"], "album": row["album"],
             "name": row["name"], "mtime": row["mtime"],
+            "size": row["size"],
             "person_photo_score": round(score, 5),
         })
     return {
@@ -336,7 +337,15 @@ def candidates(db_path: Path, *, album: str = "", manifest: set[str] | None = No
     }
 
 
-def render_html(report: dict, *, page: int, page_size: int) -> str:
+def _live_fingerprint(item: dict) -> str:
+    # Keep stable with the strictly validated server image fingerprint.
+    return hashlib.sha256(
+        (str(item["path"])+"\\0"+str(item["mtime"])+"\\0"+str(item["size"])).encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def render_html(report: dict, *, page: int, page_size: int,
+                live_mode: bool=False) -> str:
     if page < 1 or not 1 <= page_size <= 200:
         raise ValueError("invalid page or page_size")
     start = (page-1)*page_size
@@ -375,6 +384,7 @@ def render_html(report: dict, *, page: int, page_size: int) -> str:
     dataset = json.dumps([
         {"id":int(x["id"]), "album":x["album"], "name":x["name"],
          "score":float(x["person_photo_score"]),
+         "fingerprint":_live_fingerprint(x) if live_mode else None,
          "duplicate_review":report.get("exact_file_copies",{}).get(int(x["id"]))}
         for x in report["candidates"]
     ],ensure_ascii=True,separators=(",",":"))
@@ -387,10 +397,33 @@ const PAGE_SIZE = __REVIEW_PAGE_SIZE__;
 let currentPage = __REVIEW_PAGE_NUMBER__;
 const KEY = 'photo-review-v1:__REVIEW_SCOPE__';
 const PRIOR_REVIEWS = __PRIOR_REVIEWS__;
+const LIVE_MODE = __LIVE_MODE__;
 let choices = {};
-try { choices = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) {}
+if (!LIVE_MODE) {
+  try { choices = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) {}
+}
 for (const [id,decision] of Object.entries(PRIOR_REVIEWS)) {
   if (!choices[id]) choices[id]={decision,reviewed_at:'imported from export'};
+}
+let FILTER_MODE='all';
+let FILTER_TEXT='';
+function shownItems() {
+  const text=FILTER_TEXT.trim().toLocaleLowerCase();
+  return ALL.filter(item => {
+    const state=choices[String(item.id)]?.decision || '';
+    const pass=FILTER_MODE==='all' ||
+      (FILTER_MODE==='unreviewed' && !state) ||
+      (FILTER_MODE==='duplicates' && item.duplicate_review?.same_image_bytes) ||
+      state===FILTER_MODE;
+    return pass && (!text || item.name.toLocaleLowerCase().includes(text) ||
+                   item.album.toLocaleLowerCase().includes(text));
+  });
+}
+function applyFilters() {
+  FILTER_MODE=document.getElementById('filterMode').value;
+  FILTER_TEXT=document.getElementById('searchText').value;
+  currentPage=1;
+  populatePage();
 }
 function redraw() {
   document.querySelectorAll('article[data-id]').forEach(card => {
@@ -399,10 +432,41 @@ function redraw() {
   });
   document.getElementById('marked').textContent = Object.keys(choices).length;
 }
-function mark(id, decision) {
-  choices[id] = { decision, reviewed_at: new Date().toISOString() };
+async function mark(id, decision) {
+  const item = ALL.find(x => x.id === id);
+  if (!item) return;
+  if (LIVE_MODE && item.fingerprint) {
+    const save = document.getElementById('saveState');
+    save.textContent = 'Сохраняю…';
+    try {
+      const prefix = location.pathname.endsWith('/') ?
+        location.pathname.slice(0,-1) : location.pathname;
+      const resp = await fetch(prefix+'/api/review', {
+        method: 'POST',
+        mode: 'same-origin',
+        credentials: 'omit',
+        headers: {'Content-Type':'application/json',
+                  'X-Photo-Review':'manual-user-gesture'},
+        body: JSON.stringify({id,decision,fingerprint:item.fingerprint})
+      });
+      const answer=await resp.json();
+      if (!resp.ok || !answer.saved) throw Error('save failed');
+      if (decision==='clear') delete choices[id];
+      else choices[id] = {decision,reviewed_at:new Date().toISOString()};
+      save.textContent = '✓ Сохранено на телефоне ('+answer.count+')';
+      redraw();
+      if(FILTER_MODE!=='all')populatePage();
+      return;
+    } catch (_) {
+      save.textContent = '⚠ Не сохранено на телефоне. Экспортируй отметки.';
+      return;
+    }
+  }
+  if(decision==='clear') delete choices[id];
+  else choices[id] = {decision,reviewed_at:new Date().toISOString()};
   try { localStorage.setItem(KEY, JSON.stringify(choices)); } catch (_) {}
   redraw();
+  if(FILTER_MODE!=='all')populatePage();
 }
 function exportReviews() {
   const payload = JSON.stringify({schema:1,kind:'manual-photo-review',
@@ -414,22 +478,50 @@ function exportReviews() {
 }
 function importReviews(input) {
   if (!input.files?.[0])return;
-  const r = new FileReader();r.onload=()=>{
+  const r = new FileReader();r.onload=async()=>{
     try {const x=JSON.parse(r.result);
       if(x.schema!==1||x.scope!==KEY||
           !x.decisions||typeof x.decisions!=='object')throw Error('scope/format');
       const allowed=['mine','other','in_album'];
+      const newChoices={};
+      const updates=[];
+      const known=new Map(ALL.map(item=>[String(item.id),item]));
       for(const [id,v] of Object.entries(x.decisions)) {
         if(!/^[0-9]+$/.test(id)||!allowed.includes(v?.decision))continue;
-        choices[id]={decision:v.decision,reviewed_at:String(v.reviewed_at||'')};
+        const item=known.get(id);
+        if(!item) continue;
+        newChoices[id]={decision:v.decision,reviewed_at:String(v.reviewed_at||'')};
+        if(LIVE_MODE) {
+          if(!item.fingerprint)continue;
+          updates.push({id:Number(id),decision:v.decision,fingerprint:item.fingerprint});
+        }
       }
-      try {localStorage.setItem(KEY,JSON.stringify(choices));}catch(_){}
+      if(LIVE_MODE && updates.length) {
+        const prefix=location.pathname.endsWith('/') ?
+          location.pathname.slice(0,-1):location.pathname;
+        const response=await fetch(prefix+'/api/import',{
+          method:'POST',mode:'same-origin',credentials:'omit',
+          headers:{'Content-Type':'application/json',
+                   'X-Photo-Review':'manual-user-gesture'},
+          body:JSON.stringify({updates})
+        });
+        const answer=await response.json();
+        if(!response.ok||!answer.saved)throw Error('server persistence failed');
+        document.getElementById('saveState').textContent=
+          '✓ Импорт сохранён на телефоне ('+answer.count+')';
+      }
+      Object.assign(choices,newChoices);
+      if (!LIVE_MODE) {
+        try {localStorage.setItem(KEY,JSON.stringify(choices));}catch(_){}
+      }
       redraw();
-    }catch(_){alert('Не удалось прочитать файл разметки');}
+      populatePage();
+    }catch(_){alert('Импорт не выполнен. Проверь файл разметки и соединение с локальным сервером.');}
   };r.readAsText(input.files[0]);
 }
 function movePage(delta) {
-  currentPage = Math.max(1,Math.min(Math.ceil(ALL.length/PAGE_SIZE),currentPage+delta));
+  const count=shownItems().length;
+  currentPage = Math.max(1,Math.min(Math.max(1,Math.ceil(count/PAGE_SIZE)),currentPage+delta));
   populatePage();
   window.scrollTo(0,0);
 }
@@ -437,7 +529,8 @@ function populatePage() {
   const holder=document.getElementById('tiles');
   holder.replaceChildren();
   const begin=(currentPage-1)*PAGE_SIZE;
-  ALL.slice(begin,begin+PAGE_SIZE).forEach(item=>{
+  const visible=shownItems();
+  visible.slice(begin,begin+PAGE_SIZE).forEach(item=>{
     const card=document.createElement('article');
     card.className='tile';card.dataset.id=String(item.id);
     const image=document.createElement('img');
@@ -459,7 +552,8 @@ function populatePage() {
     }
     card.appendChild(caption);
     const buttons=document.createElement('div');buttons.className='buttons';
-    for (const [label,code] of [['✅ Это я','mine'],['Не я','other'],['В альбоме','in_album']]) {
+    for (const [label,code] of [['✅ Это я','mine'],['Не я','other'],
+                                ['В альбоме','in_album'],['Снять отметку','clear']]) {
       const button=document.createElement('button');button.textContent=label;
       button.addEventListener('click',()=>mark(item.id,code));
       buttons.appendChild(button);
@@ -467,9 +561,10 @@ function populatePage() {
     card.appendChild(buttons);holder.appendChild(card);
   });
   document.getElementById('pageInfo').textContent =
-    'Страница '+currentPage+' из '+Math.max(1,Math.ceil(ALL.length/PAGE_SIZE));
+    'Страница '+currentPage+' из '+Math.max(1,Math.ceil(visible.length/PAGE_SIZE))+
+    ' · найдено '+visible.length;
   document.getElementById('prevPage').disabled=currentPage<=1;
-  document.getElementById('nextPage').disabled=currentPage*PAGE_SIZE>=ALL.length;
+  document.getElementById('nextPage').disabled=currentPage*PAGE_SIZE>=visible.length;
   redraw();
 }
 window.addEventListener('DOMContentLoaded',populatePage);
@@ -478,6 +573,7 @@ window.addEventListener('DOMContentLoaded',populatePage);
                   .replace("__REVIEW_PAGE_SIZE__",str(page_size))
                   .replace("__REVIEW_PAGE_NUMBER__",str(page))
                   .replace("__REVIEW_SCOPE__",scope)
+                  .replace("__LIVE_MODE__","true" if live_mode else "false")
                   .replace("__PRIOR_REVIEWS__",json.dumps(
                       {str(k):v for k,v in report.get("reviewed_decisions",{}).items()},
                       separators=(",",":"))))
@@ -485,7 +581,8 @@ window.addEventListener('DOMContentLoaded',populatePage);
 body{font-family:system-ui,sans-serif;background:#13171e;color:#f4f5f6;margin:0;padding:18px}
 h1{font-size:1.25rem}.note{max-width:1100px;line-height:1.5;color:#c3cbd7}
 .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:15px 0}
-button,.action{cursor:pointer;border:1px solid #718095;border-radius:7px;background:#24344a;color:white;padding:8px}
+button,.action,select,input{border:1px solid #718095;border-radius:7px;background:#24344a;color:white;padding:8px}
+button,.action{cursor:pointer}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:12px}
 .tile{background:#202936;border:1px solid #3a4352;border-radius:11px;padding:8px;overflow:hidden}
 .tile img{width:100%;aspect-ratio:1;object-fit:contain;background:#0c0c0c}
@@ -500,7 +597,8 @@ button,.action{cursor:pointer;border:1px solid #718095;border-radius:7px;backgro
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; '
         'img-src http://127.0.0.1:18780; style-src &#39;unsafe-inline&#39;; '
-        'script-src &#39;unsafe-inline&#39;">'
+        + ('connect-src &#39;self&#39;; ' if live_mode else '')
+        + 'script-src &#39;unsafe-inline&#39;">'
         f'<title>Проверка фото вне альбома — страница {page}</title>{style}'
         '<h1>Фотографии людей для ручной проверки</h1>'
         f'<p class="note">{escape(details)}</p>'
@@ -508,7 +606,17 @@ button,.action{cursor:pointer;border:1px solid #718095;border-radius:7px;backgro
         '<div class="actions"><button onclick="exportReviews()">Экспортировать отметки</button>'
         '<label class="action">Импортировать отметки <input type="file" '
         'accept=".json" onchange="importReviews(this)"></label>'
-        '<span>Отмечено: <b id="marked">0</b></span></div>'
+        '<span>Отмечено: <b id="marked">0</b></span>'
+        '<span id="saveState" role="status"></span></div>'
+        '<div class="actions"><label>Показывать '
+        '<select id="filterMode" onchange="applyFilters()">'
+        '<option value="all">Все</option><option value="unreviewed">Не просмотренные</option>'
+        '<option value="mine">Это я</option><option value="other">Не я</option>'
+        '<option value="in_album">В альбоме</option>'
+        '<option value="duplicates">Точные копии</option></select></label>'
+        '<input id="searchText" placeholder="Поиск по папке или имени" '
+        'oninput="applyFilters()" autocomplete="off">'
+        '</div>'
         '<div class="actions"><button id="prevPage" onclick="movePage(-1)">← Назад</button>'
         '<strong id="pageInfo"></strong>'
         '<button id="nextPage" onclick="movePage(1)">Вперёд →</button></div>'
@@ -528,9 +636,15 @@ def main() -> int:
                     help="Your manual-review JSON export; verify scope and exact file copies")
     ap.add_argument("--no-auto-reviews",action="store_true",
                     help="Do not inspect latest exported review JSON in shared Download")
+    ap.add_argument("--no-saved-reviews",action="store_true",
+                    help="Ignore private durable manual review history for this run")
     ap.add_argument("--include-noise",action="store_true",help="include stickers/thumbnails")
     ap.add_argument("--page",type=int,default=1)
     ap.add_argument("--page-size",type=int,default=96)
+    ap.add_argument("--serve",action="store_true",
+                    help="Loopback browser review with immediate durable private saves")
+    ap.add_argument("--port",type=int,default=0,
+                    help="Loopback HTTP port for --serve (0 = OS-selected)")
     ap.add_argument("--output-dir",type=Path,default=state/"forensics")
     opts=ap.parse_args()
     report=candidates(opts.database,album=opts.exclude_album,
@@ -544,10 +658,18 @@ def main() -> int:
         found_reviews=read_reviews(reviewed_path,report["review_scope"])
     else:
         found_reviews={}
-    if reviewed_path is not None:
-        report=annotate_exact_copies(report,opts.database,found_reviews)
+    from gallery_review_server import validated_state_decisions
+    saved={} if opts.no_saved_reviews else validated_state_decisions(report,state)
+    # Durable manual decisions are the source of truth, except when an
+    # explicitly user-supplied JSON export overrides a previous choice.
+    combined={**saved, **found_reviews}
+    if combined:
+        report=annotate_exact_copies(report,opts.database,combined)
     if not 1 <= opts.page_size <= 200 or opts.page < 1:
         ap.error("invalid page options")
+    if opts.serve:
+        from gallery_review_server import serve
+        return serve(report,state,opts.page_size,opts.port)
     output=opts.output_dir
     output.mkdir(parents=True,exist_ok=True,mode=0o700)
     output.chmod(0o700)
@@ -572,6 +694,7 @@ def main() -> int:
         "source_photos_opened": bool(reviewed_path and
                                    report.get("feedback_stats",{}).get("hash_bytes_read",0)),
         "review_export_loaded":reviewed_path is not None,
+        "private_saved_reviews_loaded":len(saved),
         "reviewed_decisions":len(report.get("reviewed_decisions",{})),
         "exact_duplicate_candidates":len(report.get("exact_file_copies",{})),
         "biometric_identification":False,
