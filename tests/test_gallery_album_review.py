@@ -107,7 +107,7 @@ class ReviewTests(unittest.TestCase):
         self.assertIn('exportReviews()',page)
         self.assertIn('http://127.0.0.1:18780/api/thumb?id=',page)
         self.assertEqual(page.count('class="tile"'),4)
-        self.assertIn("ALL.slice(begin,begin+PAGE_SIZE)",page)
+        self.assertIn("visible.slice(begin,begin+PAGE_SIZE)",page)
         self.assertIn('id="nextPage"',page)
         self.assertIn('id="prevPage"',page)
         self.assertIn('const ALL = [',page)
@@ -200,6 +200,7 @@ class ReviewTests(unittest.TestCase):
         self.assertIn(f"const KEY = '{r['review_scope']}'",page)
         self.assertIn("scope:KEY,decisions:choices",page)
         self.assertIn("x.scope!==KEY",page)
+        self.assertIn("'Снять отметку','clear'",page)
 
     def test_auto_import_latest_scoped_export_and_ignore_invalid(self):
         dl=self.root/"Download"

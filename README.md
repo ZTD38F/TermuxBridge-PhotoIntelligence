@@ -198,3 +198,44 @@ identity to unknown faces, uploads photos or automatically moves files.
 shared-Download discovery. All imported decisions remain human-reviewed,
 and only byte-for-byte copies are suggested automatically. With no valid
 export there is no trained facial identity and no matching outcome.
+
+### Private live review on Android (instant durable saves)
+
+Run gallery-album-review --serve --exclude-album 'Давид' only if
+you intend to review generic people photos; album "Давид" is
+currently NOT found in Termux local catalog, so this flag does
+NOT exclude any existing Google Photos/Xiaomi album members.
+
+Live mode uses an on-demand HTTP session bound exclusively to
+127.0.0.1 on an OS-selected port with an unpredictable session URL.
+Requests to save decisions must originate from that exact loopback
+origin and carry the review-only custom header. Other websites,
+cross-origin POSTs, missing session tokens and invalid input are
+rejected. The server never trains or exports a biometric identity model.
+The server exits after one hour of inactivity or six hours total.
+
+On each deliberate tap (This is me / Not me / Already in album),
+the browser sends ONLY image ID, selected decision and snapshot
+fingerprint. Before saving, the server checks the original path,
+size and modification time still match. It writes a restricted
+0600 JSON file under Termux-private review_decisions (0700),
+using interprocess locking, atomic replacement and fsync.
+No SQLite/image/album original is modified. The mobile page reports
+success only after server acknowledgement; failures show an error.
+
+Manual JSON import is validated for the same album scope and saved
+as one atomic batch. Browser filters show unreviewed, reviewed and
+exact-copy hints, plus search by name/album. Only one page's
+thumbnails are loaded at once. The workflow DOES NOT recognize
+individual faces. It records only decisions the user confirms.
+Google Photos/Xiaomi virtual album membership requires provider
+listing or explicit user-supplied manifest.
+
+In the live reviewer, manual marks can be corrected or cleared.
+Clearing a mistaken mark removes its private saved decision atomically,
+rather than converting the selection into a different class. The local
+browser offers filters (unreviewed, reviewed, exact copies) and name/folder
+search; the imported review file remains scoped to the exact album.
+The persisted record is validated again on future runs against the current
+photo path, catalog size and modification time, so a reused photo ID
+cannot silently inherit an older decision.
