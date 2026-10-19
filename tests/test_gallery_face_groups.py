@@ -143,6 +143,34 @@ class FaceGroupTests(unittest.TestCase):
         self.assertNotEqual(groups[2],groups[3])
         con.close()
 
+    def test_two_separate_faces_in_one_photo_never_same_person_group(self):
+        c=m.setup_private_db(self.dbpath)
+        v=np.zeros(128,dtype=np.float32);v[0]=1
+        # Two detections in same image have *identical* embeddings:
+        # any similarity-only algorithm would incorrectly combine them.
+        self._add_embedding(c,100,v)
+        c.execute("""INSERT INTO face_embeddings(image_id,face_ordinal,x,y,width,height,
+                    score,vector,algorithm) VALUES(?,?,?,?,?,?,?,?,?)""",
+                  (100,1,90,80,60,60,.91,v.tobytes(),m.VERSION))
+        c.commit();c.close()
+        result=m.group_embeddings(self.dbpath)
+        self.assertEqual(result["groups"],2)
+        self.assertFalse(result["same_image_faces_merged"])
+        c=m.sqlite_ro(self.dbpath)
+        ids=[x[0] for x in c.execute("select cluster_id from face_clusters order by face_id")]
+        self.assertNotEqual(ids[0],ids[1])
+        c.close()
+
+    def test_same_person_vectors_across_distinct_images_still_grouped(self):
+        c=m.setup_private_db(self.dbpath)
+        v=np.zeros(128,dtype=np.float32);v[3]=1
+        self._add_embedding(c,101,v)
+        self._add_embedding(c,102,v)
+        c.commit();c.close()
+        result=m.group_embeddings(self.dbpath)
+        self.assertEqual(result["groups"],1)
+        self.assertEqual(result["faces"],2)
+
     def test_not_group_unrelated_ambiguous_vectors(self):
         c=m.setup_private_db(self.dbpath)
         basis=np.eye(128,dtype=np.float32)
@@ -164,6 +192,18 @@ class FaceGroupTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;",txt)
         self.assertIn("127.0.0.1:18780",txt)
         self.assertEqual(p.stat().st_mode&0o777,0o600)
+
+    def test_people_gallery_search_and_full_default_limit(self):
+        self.assertEqual(m.groups_report.__defaults__,(1000,))
+        report={"scanned_images":12,"indexed_faces":18,
+                "groups":[{"id":1,"name":"Человек 1","photos":4,
+                           "photo_ids":[1,2,3,4]}]}
+        page=m.render_private_gallery(report,live=True)
+        self.assertIn("function filterPeople()",page)
+        self.assertIn("personFilter",page)
+        self.assertIn("window.addEventListener('DOMContentLoaded',filterPeople)",page)
+        self.assertIn("filterPeople();",page)
+        self.assertIn("connect-src 'self'",page)
 
     def test_wrong_model_checksum_rejected(self):
         folder=self.root/"models"

@@ -9,6 +9,21 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 state="$HOME/.termux-mcp-bridge/addons/photo-intelligence/state"
 script="$HOME/.local/share/photo-intelligence-tools/gallery_face_groups.py"
+# Verify power independently of OEM charging JobScheduler condition.
+power="$(termux-battery-status 2>/dev/null | python -c '
+import json,sys
+try:
+ d=json.load(sys.stdin)
+ charge=str(d.get("status","")).upper() in ("CHARGING","FULL")
+ temp=float(d.get("temperature",99))
+ level=int(d.get("percentage",0))
+ print("READY" if charge and temp < 40 and level >= 30 else "SKIP")
+except (ValueError,TypeError,KeyError):
+ print("SKIP")
+' 2>/dev/null)" || power="SKIP"
+if [[ "$power" != "READY" ]];then
+  exit 0
+fi
 mkdir -p "$state"
 chmod 700 "$state"
 if [[ ! -f "$script" || -L "$script" ]];then exit 1;fi
