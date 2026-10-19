@@ -239,3 +239,50 @@ search; the imported review file remains scoped to the exact album.
 The persisted record is validated again on future runs against the current
 photo path, catalog size and modification time, so a reused photo ID
 cannot silently inherit an older decision.
+
+### Offline face-based People albums — native Termux, no Google Photos required
+
+Use the standalone face-group engine scripts/gallery_face_groups.py on
+locally readable images. The separate private face_groups.sqlite3 catalog
+holds SFace facial feature vectors and clustering links. Treat these
+biometric vectors as sensitive private data: they never leave the device.
+The database and derived face-cover previews use restrictive permissions.
+Original images, main gallery DB and existing albums are never modified.
+
+YuNet from OpenCV Zoo (MIT) performs face detection with landmarks; SFace
+(Apache-2.0) produces 128D L2-normalized face features. Weights are
+SHA-256 verified against pinned upstream binaries by
+scripts/install_face_models.sh; model binaries are not committed to GitHub.
+The code uses PIL, NumPy and onnxruntime, not opencv-python, Shizuku,
+ADB, root or MT Manager.
+
+Quick start:
+    bash scripts/install_face_models.sh
+    python scripts/gallery_face_groups.py --index --batch-size 200 --max-seconds 100
+    python scripts/gallery_face_groups.py --group
+    python scripts/gallery_face_groups.py --report
+    python scripts/gallery_face_groups.py --serve
+
+The People UI shows a representative, locally generated face crop for
+each automatically formed cluster, and collapsible lists of original
+photos. Names are only assigned by a user after visual confirmation:
+    python scripts/gallery_face_groups.py --name-group 7 --name 'Давид'
+The optional loopback-only interface has a random session token,
+exact-origin POST checks and a limited session lifetime. Face covers
+are only stored in private 0600 HTML files, or served on localhost.
+No photos or face models/embeddings are uploaded externally.
+
+Groups use a conservative cosine threshold of 0.57, shortlisting
+using centroids and bounded complete-link validation. Some same-person
+photos can be split, and different people might occasionally be
+merged. It is not as exhaustively tested as Google Photos. Cloud
+album membership is not inferred from local file paths.
+
+Native Termux JobScheduler can resume in small batches of up to 240
+photos and 105 seconds while charging only, with battery + thermal
+guards. The scheduler is configured only for this user-requested
+automatic workflow; it never needs network, never touches Android/data,
+and may be delayed by Android battery/background restrictions.
+A job can be stopped by cancelling its specific job ID (never
+cancel all jobs, which could affect unrelated user automations).
+\nRead-only progress: python scripts/gallery_face_groups.py --status.\n
