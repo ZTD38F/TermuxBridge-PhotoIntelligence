@@ -306,3 +306,15 @@ NetworkRequest for jobs with network=none. Avoid running
 termux-job-scheduler --pending to inspect this job. Instead observe the
 read-only face index --status and face_auto_index.log after charging.
 Registration acknowledgement alone does not prove future execution.
+
+### Power disconnection during an automatic face-index job
+
+Scheduled indexing passes --require-charging to both --index and --group.
+On every job start and every 12 processed photos, the indexer checks
+Termux battery telemetry. Indexing halts upon unplug, charge under 30%,
+temperature at or above 40 C or unavailable telemetry. The scheduled
+--group invocation checks power independently and skips regrouping after
+unplug. Ordinary manual indexing (without --require-charging) retains the
+legacy battery guard. --ignore-battery and --require-charging are mutually
+exclusive; power checks cannot be bypassed accidentally for automatic jobs.
+No original image files or gallery SQLite data are modified by this guard.

@@ -34,6 +34,56 @@ class FaceGroupTests(unittest.TestCase):
         c.execute("INSERT INTO images VALUES (?,?,?,?)",(2,"shizuku:///Android/data/a.jpg",5,123))
         c.commit();c.close()
 
+    def test_charging_requirements_fail_closed(self):
+        from unittest.mock import patch
+        import subprocess,json
+        samples=[
+            ({"status":"DISCHARGING","percentage":90,"temperature":31},False),
+            ({"status":"CHARGING","percentage":29,"temperature":31},False),
+            ({"status":"CHARGING","percentage":60,"temperature":40},False),
+            ({"status":"CHARGING","percentage":60,"temperature":35},True),
+            ({"status":"FULL","percentage":100,"temperature":35},True),
+        ]
+        for data,expected in samples:
+            result=subprocess.CompletedProcess(['termux-battery-status'],0,
+                                               stdout=json.dumps(data))
+            with patch.object(m.subprocess,'run',return_value=result):
+                self.assertEqual(m.battery_safe(require_charging=True)[0],expected)
+        with patch.object(m.subprocess,'run',side_effect=OSError('unavailable')):
+            self.assertFalse(m.battery_safe(require_charging=True)[0])
+            self.assertTrue(m.battery_safe(require_charging=False)[0])
+
+    def test_charging_guard_blocks_before_models_and_db(self):
+        from unittest.mock import patch
+        with patch.object(m,'battery_safe',return_value=(False,'not charging')):
+            result=m.do_batch(self.src,self.dbpath,self.root/'missing-models',
+                              self.media,5,20,require_charging=True)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['scanned'],0)
+        self.assertFalse(self.dbpath.exists())
+        with self.assertRaisesRegex(ValueError,'charging guard'):
+            m.do_batch(self.src,self.dbpath,self.root/'missing',self.media,
+                       5,20,ignore_battery=True,require_charging=True)
+
+    def test_unplug_during_batch_stops_before_next_twelve(self):
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        entries=[(i,'Camera/a.jpg',12,42.0,self.media/'Camera/a.jpg')
+                 for i in range(1,14)]
+        with ExitStack() as stack:
+            power=stack.enter_context(patch.object(
+                m,'battery_safe',side_effect=[(True,'charging'),(False,'unplugged')]))
+            stack.enter_context(patch.object(m,'verify_models',return_value={}))
+            stack.enter_context(patch.object(m,'_cpu_session',return_value=object()))
+            stack.enter_context(patch.object(m,'iter_pending',return_value=iter(entries)))
+            stack.enter_context(patch.object(m,'extract_faces',return_value=[]))
+            stack.enter_context(patch.object(m,'nonimage_archive_header',return_value=None))
+            r=m.do_batch(self.src,self.dbpath,self.root/'model-fixture',
+                         self.media,14,30,require_charging=True)
+        self.assertEqual(r['processed'],12)
+        self.assertEqual(r['paused'],'unplugged')
+        self.assertEqual(power.call_count,2)
+
     def test_mislabeled_zip_as_webp_is_not_a_photo(self):
         archive=self.media/"Camera/sticker.webp"
         archive.write_bytes(b"PK\x03\x04" + b"not real image" * 4)

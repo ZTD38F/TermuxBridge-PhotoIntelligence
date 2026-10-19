@@ -338,28 +338,38 @@ def reconcile_existing_mislabeled_archives(db:sqlite3.Connection,root:Path,
     return updated
 
 
-def battery_safe() -> tuple[bool,str]:
+def battery_safe(require_charging:bool=False) -> tuple[bool,str]:
     try:
         r=subprocess.run(["termux-battery-status"],capture_output=True,text=True,timeout=5)
         if r.returncode:
-            return True,"battery telemetry unavailable"
+            return (not require_charging),"battery telemetry unavailable"
         data=json.loads(r.stdout)
         level=int(data.get("percentage",100))
         status=str(data.get("status","")).upper()
         temperature=float(data.get("temperature",0))
+        if require_charging:
+            if status not in ("CHARGING","FULL"):
+                return False,"charging-required guard"
+            if level<30:
+                return False,f"charging-required minimum 30%, current {level}%"
+            if temperature>=40:
+                return False,f"charging-required thermal guard {temperature}C"
         if temperature>=42:
             return False,f"thermal guard {temperature}C"
         if level<=23 and status not in ("CHARGING","FULL"):
             return False,f"battery {level}%, not charging"
         return True,f"battery {level}%, {temperature}C, {status}"
     except (ValueError,OSError,subprocess.TimeoutExpired):
-        return True,"battery telemetry unavailable"
+        return (not require_charging),"battery telemetry unavailable"
 
 
 def do_batch(source:Path, destination:Path, models:Path, root:Path,
-             limit:int,max_seconds:int, ignore_battery:bool=False) -> dict:
-    if not ignore_battery:
-        proceed,why=battery_safe()
+             limit:int,max_seconds:int, ignore_battery:bool=False,
+             require_charging:bool=False) -> dict:
+    if ignore_battery and require_charging:
+        raise ValueError("cannot override a mandatory charging guard")
+    if require_charging or not ignore_battery:
+        proceed,why=battery_safe(require_charging=require_charging)
         if not proceed:
             return {"ok":False,"blocked":why,"scanned":0}
     else:why="battery guard explicitly overridden"
@@ -374,8 +384,9 @@ def do_batch(source:Path, destination:Path, models:Path, root:Path,
             if counts["processed"]>0 and time.monotonic()-start>max_seconds:
                 counts["paused"]="time budget reached"
                 break
-            if not ignore_battery and counts["processed"] and counts["processed"]%24==0:
-                proceed,condition=battery_safe()
+            period=12 if require_charging else 24
+            if (require_charging or not ignore_battery) and counts["processed"] and counts["processed"]%period==0:
+                proceed,condition=battery_safe(require_charging=require_charging)
                 if not proceed:
                     counts["paused"]=condition
                     break
@@ -724,6 +735,8 @@ def main() -> int:
     p.add_argument("--shared-root",type=Path,default=SHARED_ROOT)
     p.add_argument("--models",type=Path,default=MODEL_ROOT)
     p.add_argument("--ignore-battery",action="store_true")
+    p.add_argument("--require-charging",action="store_true",
+                   help="Fail closed if power is unplugged, too low or too hot")
     p.add_argument("--status",action="store_true",
                    help="Read-only current scan progress and group count")
     p.add_argument("--serve",action="store_true",
@@ -733,13 +746,22 @@ def main() -> int:
     args=p.parse_args()
     if not 1<=args.batch_size<=500 or not 5<=args.max_seconds<=3600:
         p.error("batch-size or max-seconds out of safe range")
+    if args.ignore_battery and args.require_charging:
+        p.error("--ignore-battery cannot be combined with --require-charging")
     if args.status:
         print(json.dumps(status_report(args.gallery_db,args.faces_db),ensure_ascii=False))
     if args.index:
         print(json.dumps(do_batch(args.gallery_db,args.faces_db,args.models,
                                   args.shared_root,args.batch_size,
-                                  args.max_seconds,args.ignore_battery),ensure_ascii=False))
+                                  args.max_seconds,args.ignore_battery,
+                                  args.require_charging),ensure_ascii=False))
     if args.group:
+        if args.require_charging:
+            allowed,reason=battery_safe(require_charging=True)
+            if not allowed:
+                print(json.dumps({"ok":False,"blocked":reason,
+                                  "groups_recomputed":False},ensure_ascii=False))
+                return 0
         print(json.dumps(group_embeddings(args.faces_db,args.threshold),ensure_ascii=False))
     if args.name_group:
         print(json.dumps(name_group(args.faces_db,args.name_group,args.name),
