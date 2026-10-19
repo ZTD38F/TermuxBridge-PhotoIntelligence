@@ -286,3 +286,23 @@ and may be delayed by Android battery/background restrictions.
 A job can be stopped by cancelling its specific job ID (never
 cancel all jobs, which could affect unrelated user automations).
 \nRead-only progress: python scripts/gallery_face_groups.py --status.\n
+
+### Automatic face-groups: conservative correctness and charging guard
+
+Separate faces detected inside the same photo are never merged into one
+group, regardless of embedding similarity. Clusters check representative
+vectors from throughout the cluster instead of its oldest subset. The People
+UI shows up to 1000 groups and lets you search by group name and number.
+
+The optional install_face_schedule.sh registers JobScheduler ID 74061
+for 15-minute charging-only sessions requiring storage and battery not low.
+The job shell additionally fails closed unless current Android battery
+telemetry confirms CHARGING or FULL, charge >=30%, temperature <40 C.
+No recognition workloads run on an unplugged or low-charge phone.
+
+On Termux:API 0.53.0 with Android 16, the JobScheduler pending-jobs
+display may throw NullPointerException while formatting a null
+NetworkRequest for jobs with network=none. Avoid running
+termux-job-scheduler --pending to inspect this job. Instead observe the
+read-only face index --status and face_auto_index.log after charging.
+Registration acknowledgement alone does not prove future execution.

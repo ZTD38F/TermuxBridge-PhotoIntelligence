@@ -435,11 +435,12 @@ def group_embeddings(dbpath:Path, threshold:float=STRICT_CLUSTER_COSINE) -> dict
     if not .4<=threshold<=.95:
         raise ValueError("threshold range")
     with closing(setup_private_db(dbpath)) as db:
-        rows=db.execute("SELECT face_id,vector FROM face_embeddings ORDER BY face_id").fetchall()
+        rows=db.execute("SELECT face_id,image_id,vector FROM face_embeddings ORDER BY face_id").fetchall()
         groups=[]
         centers=[]
+        image_ids_by_group=[]
         limit_anchors=40
-        for face_id,raw in rows:
+        for face_id,image_id,raw in rows:
             vec=np.frombuffer(raw,dtype=np.float32)
             if len(vec)!=128 or not np.isfinite(vec).all():
                 continue
@@ -451,7 +452,18 @@ def group_embeddings(dbpath:Path, threshold:float=STRICT_CLUSTER_COSINE) -> dict
                               key=lambda x:float(similarities[x]),reverse=True)
                 viable=[]
                 for idx in ranked:
-                    references=groups[idx][:limit_anchors]
+                    # Two separately detected faces in the SAME photograph
+                    # cannot be inferred to be one person's face.
+                    if image_id in image_ids_by_group[idx]:
+                        continue
+                    # Sample both old and newly joined members: using only
+                    # the first 40 can overlook new cluster drift.
+                    existing=groups[idx]
+                    if len(existing)>limit_anchors:
+                        sample=np.linspace(0,len(existing)-1,num=limit_anchors,dtype=int)
+                        references=[existing[int(j)] for j in sample]
+                    else:
+                        references=existing
                     members=np.vstack([x[1] for x in references])
                     pairwise=members@vec
                     if float(pairwise.min())>=threshold:
@@ -462,6 +474,7 @@ def group_embeddings(dbpath:Path, threshold:float=STRICT_CLUSTER_COSINE) -> dict
                 if viable and (len(viable)==1 or viable[0][0]-viable[1][0]>=.06):
                     i=viable[0][1]
                     groups[i].append((face_id,vec))
+                    image_ids_by_group[i].add(image_id)
                     # Weight once per group, using newest vector.
                     center=(centers[i]*(len(groups[i])-1)+vec)/len(groups[i])
                     norm=np.linalg.norm(center)
@@ -470,6 +483,7 @@ def group_embeddings(dbpath:Path, threshold:float=STRICT_CLUSTER_COSINE) -> dict
                     continue
             groups.append([(face_id,vec)])
             centers.append(vec.copy())
+            image_ids_by_group.append({image_id})
         with db:
             db.execute("DELETE FROM face_clusters")
             for gid,items in enumerate(groups,1):
@@ -480,7 +494,8 @@ def group_embeddings(dbpath:Path, threshold:float=STRICT_CLUSTER_COSINE) -> dict
         return {"ok":True,"faces":sum(sizes),"groups":len(groups),
                 "groups_with_2plus":sum(x>=2 for x in sizes),
                 "threshold":threshold,"manual_names_unchanged":True,
-                "automatic_person_names":False}
+                "automatic_person_names":False,
+                "same_image_faces_merged":False}
 
 
 def name_group(dbpath:Path,cluster_id:int,name:str) -> dict:
@@ -504,7 +519,7 @@ def name_group(dbpath:Path,cluster_id:int,name:str) -> dict:
                 "manually_confirmed":True,"person_identified_automatically":False}
 
 
-def groups_report(dbpath:Path, source:Path, limit:int=100) -> dict:
+def groups_report(dbpath:Path, source:Path, limit:int=1000) -> dict:
     with closing(sqlite_ro(dbpath)) as c,closing(sqlite_ro(source)) as gallery:
         groups=c.execute("""
         SELECT cluster_id, COUNT(DISTINCT image_id)
@@ -617,7 +632,23 @@ def render_private_gallery(report:dict, live:bool=False) -> str:
         html.append("</details></section>")
     html.append("</main>")
     if live:
-        html.append("""<script>
+        html.append("""<div><label>Поиск по группам
+<input id='personFilter' type='search' oninput='filterPeople()'></label>
+<span id='filteredCount'></span></div>
+<script>
+function filterPeople(){
+ const value=document.getElementById('personFilter').value.toLocaleLowerCase().trim();
+ let count=0;
+ document.querySelectorAll('.groups section').forEach(section=>{
+  const id=section.dataset.group;
+  const title=section.querySelector('h3').textContent.toLocaleLowerCase();
+  const match=!value||title.includes(value)||id.includes(value);
+  section.hidden=!match;
+  if(match)count++;
+ });
+ document.getElementById('filteredCount').textContent=count+' групп показано';
+}
+window.addEventListener('DOMContentLoaded',filterPeople);
 async function renameGroup(id){
  const current=document.getElementById('g'+id).textContent;
  const name=prompt('Имя человека (только по твоему подтверждению):',current);
@@ -631,6 +662,7 @@ async function renameGroup(id){
   const data=await resp.json();
   if(!resp.ok||!data.ok)throw Error('failed');
   document.getElementById('g'+id).textContent=data.name;
+  filterPeople();
   document.getElementById('state').textContent='✓ Имя сохранено на телефоне';
  }catch(e){document.getElementById('state').textContent='⚠ Имя не сохранено';}
 }
