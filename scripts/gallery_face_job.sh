@@ -36,6 +36,6 @@ if [[ -f "$log" && $(stat -c %s "$log") -ge 200000 ]];then
 fi
 {
  date -Is
- /data/data/com.termux/files/usr/bin/python -B "$script" --index --batch-size 240 --max-seconds 105
- /data/data/com.termux/files/usr/bin/python -B "$script" --group
+ /data/data/com.termux/files/usr/bin/python -B "$script" --index --require-charging --batch-size 240 --max-seconds 105
+ /data/data/com.termux/files/usr/bin/python -B "$script" --group --require-charging
 } >> "$log" 2>&1
