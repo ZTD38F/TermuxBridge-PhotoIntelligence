@@ -294,6 +294,50 @@ def iter_pending(source:Path, dest:sqlite3.Connection, limit:int, root:Path):
             yield (image_id,relative,int(size),float(mtime),path)
 
 
+def nonimage_archive_header(path:Path) -> str | None:
+    """Reject mislabeled archives before loading third-party image decoders."""
+    try:
+        with path.open("rb") as src:
+            start=src.read(8)
+        if start.startswith(b"PK\x03\x04"):
+            return "ZIP_SIGNATURE"
+        if start.startswith(b"Rar!"):
+            return "RAR_SIGNATURE"
+        if start.startswith(b"7z\xbc\xaf\x27\x1c"):
+            return "SEVENZIP_SIGNATURE"
+    except OSError:
+        return None
+    return None
+
+
+def reconcile_existing_mislabeled_archives(db:sqlite3.Connection,root:Path,
+                                           limit:int=500) -> int:
+    """Correct error classification without modifying originals or embeddings."""
+    rows=db.execute("""SELECT image_id,path,size,mtime FROM face_scans
+                    WHERE status='ERROR' AND error_code='UnidentifiedImageError'
+                    LIMIT ?""",(limit,)).fetchall()
+    updated=0
+    for image_id,relative,size,mtime in rows:
+        path=_safepath(root,relative)
+        if path is None or not path.is_file():
+            continue
+        try:
+            stat=path.stat()
+            if stat.st_size!=size or abs(stat.st_mtime-mtime)>3:
+                continue
+        except OSError:
+            continue
+        error=nonimage_archive_header(path)
+        if not error:
+            continue
+        with db:
+            db.execute("""UPDATE face_scans SET status='SKIPPED_NONIMAGE',
+                  error_code=? WHERE image_id=? AND status='ERROR'
+                  AND error_code='UnidentifiedImageError'""",(error,image_id))
+        updated+=1
+    return updated
+
+
 def battery_safe() -> tuple[bool,str]:
     try:
         r=subprocess.run(["termux-battery-status"],capture_output=True,text=True,timeout=5)
@@ -322,6 +366,7 @@ def do_batch(source:Path, destination:Path, models:Path, root:Path,
     verify_models(models)
     start=time.monotonic()
     with closing(setup_private_db(destination)) as db:
+        recovered=reconcile_existing_mislabeled_archives(db,root)
         det=_cpu_session(models/"face_detection_yunet_2023mar.onnx")
         rec=_cpu_session(models/"face_recognition_sface_2021dec.onnx")
         counts={"processed":0,"images_with_faces":0,"faces":0,"failures":0}
@@ -336,7 +381,11 @@ def do_batch(source:Path, destination:Path, models:Path, root:Path,
                     break
             status="DONE";error=None;faces=[]
             try:
-                faces=extract_faces(path,det,rec)
+                nonimage=nonimage_archive_header(path)
+                if nonimage:
+                    status="SKIPPED_NONIMAGE";error=nonimage
+                else:
+                    faces=extract_faces(path,det,rec)
             except (OSError,ValueError,RuntimeError,MemoryError) as exc:
                 status="ERROR";error=type(exc).__name__;counts["failures"]+=1
             except Exception as exc:
@@ -367,7 +416,8 @@ def do_batch(source:Path, destination:Path, models:Path, root:Path,
             counts["processed"]+=1
             counts["faces"]+=len(faces)
             counts["images_with_faces"]+=bool(faces)
-        counts.update({"ok":True,"elapsed_seconds":round(time.monotonic()-start,2),
+        counts.update({"ok":True,"archive_mislabeled_reclassified":recovered,
+                       "elapsed_seconds":round(time.monotonic()-start,2),
                        "models":"YuNet+SFace local verified",
                        "device_policy":why,"photos_modified":False,
                        "images_uploaded":False,"recognition_labels_assigned":False})
@@ -610,6 +660,7 @@ def status_report(gallery_db:Path,faces_db:Path) -> dict:
                 "face_instances":c.execute("SELECT count(*) FROM face_embeddings").fetchone()[0],
                 "face_groups":c.execute("SELECT count(distinct cluster_id) FROM face_clusters").fetchone()[0],
                 "unreadable_files":c.execute("SELECT count(*) FROM face_scans WHERE status='ERROR'").fetchone()[0],
+                "mislabeled_archives_skipped":c.execute("SELECT count(*) FROM face_scans WHERE status='SKIPPED_NONIMAGE'").fetchone()[0],
                 "database_integrity":c.execute("PRAGMA quick_check").fetchone()[0],
                 "photos_modified":False,
                 "person_names_inferred":False}

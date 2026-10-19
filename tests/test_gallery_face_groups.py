@@ -34,6 +34,31 @@ class FaceGroupTests(unittest.TestCase):
         c.execute("INSERT INTO images VALUES (?,?,?,?)",(2,"shizuku:///Android/data/a.jpg",5,123))
         c.commit();c.close()
 
+    def test_mislabeled_zip_as_webp_is_not_a_photo(self):
+        archive=self.media/"Camera/sticker.webp"
+        archive.write_bytes(b"PK\x03\x04" + b"not real image" * 4)
+        self.assertEqual(m.nonimage_archive_header(archive),"ZIP_SIGNATURE")
+        self.assertIsNone(m.nonimage_archive_header(self.media/"Camera/a.jpg"))
+
+    def test_old_decoder_errors_are_reclassified_without_media_mutation(self):
+        archive=self.media/"Camera/renamed.webp"
+        archive.write_bytes(b"PK\x03\x04" + b"zipped pretend webp")
+        info=archive.stat()
+        c=m.setup_private_db(self.dbpath)
+        with c:
+            c.execute("""INSERT INTO face_scans
+              (image_id,path,size,mtime,algorithm,status,checked_at,error_code)
+              VALUES(?,?,?,?,?,?,?,?)""",
+              (45,"Camera/renamed.webp",info.st_size,info.st_mtime,m.VERSION,
+               "ERROR",m.now(),"UnidentifiedImageError"))
+        original=archive.read_bytes()
+        n=m.reconcile_existing_mislabeled_archives(c,self.media)
+        self.assertEqual(n,1)
+        self.assertEqual(c.execute("select status from face_scans where image_id=45").fetchone()[0],
+                         "SKIPPED_NONIMAGE")
+        self.assertEqual(archive.read_bytes(),original)
+        c.close()
+
     def test_private_file_mode_and_schema(self):
         c=m.setup_private_db(self.dbpath)
         self.assertEqual(self.dbpath.stat().st_mode&0o777,0o600)
