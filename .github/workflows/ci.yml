@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
-      - run: python -m pip install --upgrade pip pillow
+      - run: python -m pip install --upgrade pip pillow "numpy>=2.0,<3"
       - run: python -m py_compile runtime/*.py adapter.py service.py scripts/*.py
       - run: bash -n install.sh
       - run: PYTHONPATH="$PWD/runtime" PHOTO_INTELLIGENCE_HOME="$PWD/.test-home" PHOTO_INTELLIGENCE_STATE="$PWD/.test-home/state" python -m unittest discover -s tests -v
