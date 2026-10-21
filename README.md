@@ -346,3 +346,21 @@ limits, storage-space requirements or the Android/Termux permission
 boundary. If the device is in Android Doze mode, JobScheduler may
 still delay an interval; the application does not claim exact-time
 continuous execution. Face groups are anonymous until manually named.
+
+
+### People grouping: covers for all anonymous groups
+
+The people-group page renders all indexed face groups, not just its first
+100. Generating and embedding cropped portraits for thousands of groups
+would increase CPU, RAM and HTML size, so high-quality face crops are
+still limited to the first 100 while the remaining groups obtain a lazy
+preview of an already indexed LOCAL photograph using the dashboard's
+thumb endpoint. This fallback is labeled Foto gruppy, not
+an isolated or verified face crop. No new photo files are created,
+no originals altered, and no new network/biometric service is enabled.
+
+For 1000+ groups, the search field and an optional 2+ photos filter are
+placed ABOVE the people grid, so browsing no longer requires scrolling to
+the bottom just to filter. The counter now distinguishes all groups from a
+truncated result. Singletons remain visible unless the user explicitly
+enables the filter.
