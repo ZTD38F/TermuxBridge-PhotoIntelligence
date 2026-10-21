@@ -186,9 +186,57 @@ class FaceWebTests(unittest.TestCase):
         self.assertIn("loadNextGroupPage(details)",page)
         self.assertIn("limit=48",page)
         self.assertIn("Показано ",page)
-        self.assertNotIn('src="http://127.0.0.1:18780/api/thumb?id=11"',page)
+        # A single lazy preview is shown for otherwise coverless groups,
+        # but the full photo list still loads only when expanded.
+        self.assertEqual(page.count('src="http://127.0.0.1:18780/api/thumb?id=11"'),1)
+        self.assertIn('<div class="photos"></div>',page)
         offline=groups.render_private_gallery(self.report,live=False)
         self.assertIn('src="http://127.0.0.1:18780/api/thumb?id=11"',offline)
+
+    def test_search_and_multiphoto_filter_appear_above_all_groups(self):
+        report={"groups":[
+            {"id":1,"revision":"0"*24,"name":"Человек 1","photos":3,"photo_ids":[11]},
+            {"id":2,"revision":"0"*24,"name":"Человек 2","photos":1,"photo_ids":[22]}
+        ],"indexed_faces":4,"scanned_images":4,"groups_truncated":False}
+        page=groups.render_private_gallery(report,live=True)
+        self.assertLess(page.index('id=\'personFilter\''),page.index('<main class=\'groups\'>'))
+        self.assertIn('data-photo-count=\'3\'',page)
+        self.assertIn('data-photo-count=\'1\'',page)
+        self.assertIn("Number(section.dataset.photoCount)>=2",page)
+        self.assertIn("(показаны все)",page)
+        truncated=dict(report,groups_truncated=True)
+        self.assertIn("(показана часть)",groups.render_private_gallery(truncated,live=True))
+
+    def test_all_groups_without_embedded_face_crop_get_lazy_local_cover(self):
+        groups_list=[]
+        for number in range(1,1202):
+            groups_list.append({
+                "id":number,"name":f"Человек {number}",
+                "revision":"0"*24,"photos":1,"photo_ids":[100000+number]
+            })
+        report={"groups":groups_list,"indexed_faces":1201,"scanned_images":1201}
+        rendered=groups.render_private_gallery(report,live=True)
+        self.assertEqual(rendered.count('class="portrait"'),1201)
+        self.assertIn(
+            'src="http://127.0.0.1:18780/api/thumb?id=101201"',rendered)
+        self.assertIn('alt="Фото группы 1201"',rendered)
+        self.assertIn('loading="lazy"',rendered)
+
+    def test_face_crop_priority_over_generic_fallback(self):
+        report={"groups":[{"id":7,"name":"Человек 7",
+            "revision":"0"*24,"photos":1,"photo_ids":[700],
+            "face_cover_data_uri":"data:image/jpeg;base64,AQID"}],
+            "indexed_faces":1,"scanned_images":1}
+        rendered=groups.render_private_gallery(report,live=True)
+        self.assertIn('src="data:image/jpeg;base64,AQID"',rendered)
+        self.assertNotIn('/api/thumb?id=700"',rendered.split("<h3")[0])
+
+    def test_malformed_image_id_not_used_for_cover(self):
+        report={"groups":[{"id":7,"name":"Человек 7",
+            "revision":"0"*24,"photos":1,"photo_ids":["7&fake=1"]}],
+            "indexed_faces":1,"scanned_images":1}
+        rendered=groups.render_private_gallery(report,live=True)
+        self.assertNotIn('src="http://127.0.0.1:18780/api/thumb?',rendered)
 
     def test_portrait_cover_stays_local_and_no_original_changes(self):
         media=self.root/"shared"

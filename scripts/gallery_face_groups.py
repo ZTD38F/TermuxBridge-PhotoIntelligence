@@ -696,15 +696,36 @@ def render_private_gallery(report:dict, live:bool=False) -> str:
           "<title>Люди — приватная галерея</title><style>body{font-family:system-ui;background:#14171d;color:#eee;padding:12px}.groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}section{border:1px solid #33414d;padding:10px;border-radius:12px}img{width:75px;height:75px;object-fit:cover;border-radius:7px;margin:2px;background:#000}.portrait{width:110px;height:110px;object-fit:cover;float:right;border:2px solid #698394}button{border:1px solid #708194;background:#223444;color:#fff;padding:8px;border-radius:7px}</style>",
           "<h2>Люди на фотографиях</h2>",
           "<p>Автоматическая группировка по лицам. Возможны неточные объединения и разделения. Имена вводишь только ты — система не определяет личность самостоятельно.</p>",
-          f"<p>Обработано фото: {report['scanned_images']}; найдено лиц: {report['indexed_faces']}; групп: {len(report['groups'])} (показана часть).</p><p id='state' role='status'></p><main class='groups'>"]
+          f"<p>Обработано фото: {report['scanned_images']}; найдено лиц: {report['indexed_faces']}; групп: {len(report['groups'])}"+(" (показана часть)." if report.get("groups_truncated",False) else " (показаны все).")+"</p><p id='state' role='status'></p>"]
+    if live:
+        html.append(
+            "<div><label>Поиск по группам "
+            "<input id='personFilter' type='search' oninput='filterPeople()'></label> "
+            "<label><input type='checkbox' id='multiOnly' onchange='filterPeople()'>"
+            " Только 2+ фото</label> "
+            "<span id='filteredCount'></span></div>")
+    html.append("<main class='groups'>")
     for group in report["groups"]:
         gid=int(group["id"])
         name=escape(group["name"])
         revision=str(group.get("revision",""))
-        html.append(f"<section data-group='{gid}' data-revision='{revision}'>")
+        html.append(
+            f"<section data-group='{gid}' data-revision='{revision}' "
+            f"data-photo-count='{int(group['photos'])}'>")
         cover=group.get("face_cover_data_uri")
         if cover and cover.startswith("data:image/jpeg;base64,"):
-            html.append(f'<img class="portrait" alt="Лицо из группы {gid}" src="{cover}">')
+            html.append(
+                f'<img class="portrait" loading="lazy" decoding="async" '
+                f'alt="Лицо из группы {gid}" src="{cover}">')
+        else:
+            # CPU-intensive crops limited to 100; other groups previously
+            # lacked a cover. Reuse a lazy local photo thumbnail.
+            ids=group.get("photo_ids") or []
+            if ids and isinstance(ids[0],int) and not isinstance(ids[0],bool) and ids[0]>0:
+                html.append(
+                    f'<img class="portrait" loading="lazy" decoding="async" '
+                    f'alt="Фото группы {gid}" '
+                    f'src="http://127.0.0.1:18780/api/thumb?id={ids[0]}">')
         html.append(f'<h3 id="g{gid}">{name}</h3>')
         html.append(f'<p>{group["photos"]} фото с лицом</p>')
         if live:
@@ -731,17 +752,16 @@ def render_private_gallery(report:dict, live:bool=False) -> str:
         html.append("</section>")
     html.append("</main>")
     if live:
-        html.append("""<div><label>Поиск по группам
-<input id='personFilter' type='search' oninput='filterPeople()'></label>
-<span id='filteredCount'></span></div>
-<script>
+        html.append("""<script>
 function filterPeople(){
  const value=document.getElementById('personFilter').value.toLocaleLowerCase().trim();
  let count=0;
  document.querySelectorAll('.groups section').forEach(section=>{
   const id=section.dataset.group;
   const title=section.querySelector('h3').textContent.toLocaleLowerCase();
-  const match=!value||title.includes(value)||id.includes(value);
+  const multi=document.getElementById('multiOnly').checked;
+  const match=(!multi||Number(section.dataset.photoCount)>=2) &&
+    (!value||title.includes(value)||id.includes(value));
   section.hidden=!match;
   if(match)count++;
  });
