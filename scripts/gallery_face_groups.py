@@ -9,6 +9,7 @@ Author: @dvkrum.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
@@ -356,8 +357,8 @@ def battery_safe(require_charging:bool=False) -> tuple[bool,str]:
                 return False,f"charging-required thermal guard {temperature}C"
         if temperature>=42:
             return False,f"thermal guard {temperature}C"
-        if level<=23 and status not in ("CHARGING","FULL"):
-            return False,f"battery {level}%, not charging"
+        # User explicitly opted into indexing at any battery percentage.
+        # Keep the device-temperature cutoff; battery 10% is allowed.
         return True,f"battery {level}%, {temperature}C, {status}"
     except (ValueError,OSError,subprocess.TimeoutExpired):
         return (not require_charging),"battery telemetry unavailable"
@@ -509,29 +510,96 @@ def group_embeddings(dbpath:Path, threshold:float=STRICT_CLUSTER_COSINE) -> dict
                 "same_image_faces_merged":False}
 
 
-def name_group(dbpath:Path,cluster_id:int,name:str) -> dict:
-    """Pin a user-supplied name to the best face; never infer identity."""
+def name_group(dbpath:Path,cluster_id:int,name:str,
+               expected_revision:str|None=None) -> dict:
+    """Pin explicitly confirmed name only if this is the same face group."""
     if not (isinstance(name,str) and 1<=len(name.strip())<=60
             and not any(ord(c)<32 for c in name)):
         raise ValueError("Invalid group name")
+    if not isinstance(cluster_id,int) or isinstance(cluster_id,bool) or cluster_id<=0:
+        raise ValueError("Invalid group")
     with closing(setup_private_db(dbpath)) as db:
-        row=db.execute("""SELECT e.face_id FROM face_embeddings e
+        # Hold the SQLite writer lock for the revision check AND the write:
+        # a concurrent regroup cannot swap a group's identity in between.
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            revision=group_revision(db,cluster_id)
+            if expected_revision is not None and expected_revision!=revision:
+                raise ValueError("face group changed; reload before naming")
+            row=db.execute("""SELECT e.face_id FROM face_embeddings e
                JOIN face_clusters g ON g.face_id=e.face_id
                WHERE g.cluster_id=? ORDER BY e.score DESC LIMIT 1""",
                        (cluster_id,)).fetchone()
-        if row is None:
-            raise ValueError("Unknown face group")
-        with db:
+            if row is None:
+                raise ValueError("Unknown face group")
             db.execute("""INSERT INTO face_manual_names(pinned_face_id,label,created_at)
                VALUES(?,?,?)
                ON CONFLICT(pinned_face_id) DO UPDATE SET label=excluded.label""",
                (row[0],name.strip(),now()))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         return {"ok":True,"group_id":cluster_id,"name":name.strip(),
-                "manually_confirmed":True,"person_identified_automatically":False}
+                "revision":revision,"manually_confirmed":True,
+                "person_identified_automatically":False}
 
 
-def groups_report(dbpath:Path, source:Path, limit:int=1000) -> dict:
+def group_revision(db:sqlite3.Connection, cluster_id:int) -> str:
+    """Membership-bound snapshot ID prevents stale page actions after regroup."""
+    face_ids=[str(int(row[0])) for row in db.execute(
+        "SELECT face_id FROM face_clusters WHERE cluster_id=? ORDER BY face_id",
+        (cluster_id,))]
+    if not face_ids:
+        raise ValueError("unknown face group")
+    return hashlib.sha256(
+        (str(cluster_id)+":"+(",".join(face_ids))).encode("ascii")
+    ).hexdigest()[:24]
+
+
+def group_photo_page(dbpath:Path, cluster_id:int, offset:int=0,
+                     limit:int=48,revision:str|None=None) -> dict:
+    """Bounded read-only pagination for all photos of one anonymous face group."""
+    if (not isinstance(cluster_id,int) or isinstance(cluster_id,bool)
+        or cluster_id<=0
+        or not isinstance(offset,int) or isinstance(offset,bool)
+        or not 0<=offset<=100000
+        or not isinstance(limit,int) or isinstance(limit,bool)
+        or not 1<=limit<=80):
+        raise ValueError("invalid face group photo page")
+    with closing(sqlite_ro(dbpath)) as c:
+        live_revision=group_revision(c,cluster_id)
+        if revision is not None and revision!=live_revision:
+            raise ValueError("face group has changed; reload")
+        row=c.execute("""SELECT COUNT(DISTINCT e.image_id)
+                         FROM face_embeddings e JOIN face_clusters g
+                         ON g.face_id=e.face_id WHERE g.cluster_id=?""",
+                      (cluster_id,)).fetchone()
+        total=int(row[0]) if row else 0
+        if total<=0:
+            raise ValueError("unknown face group")
+        result=c.execute("""SELECT e.image_id,MAX(e.score) AS best
+                            FROM face_embeddings e JOIN face_clusters g
+                            ON g.face_id=e.face_id
+                            WHERE g.cluster_id=?
+                            GROUP BY e.image_id
+                            ORDER BY best DESC,e.image_id
+                            LIMIT ? OFFSET ?""",
+                         (cluster_id,limit,offset)).fetchall()
+    return {"ok":True,"group_id":cluster_id,"revision":live_revision,"total":total,
+            "offset":offset,"limit":limit,
+            "photo_ids":[int(row[0]) for row in result],
+            "has_more":offset+len(result)<total,
+            "identity_inferred":False}
+
+
+def groups_report(dbpath:Path, source:Path, limit:int=50000) -> dict:
+    if not isinstance(limit,int) or isinstance(limit,bool) or not 1<=limit<=50000:
+        raise ValueError("invalid groups report limit")
     with closing(sqlite_ro(dbpath)) as c,closing(sqlite_ro(source)) as gallery:
+        total_groups=int(c.execute(
+            "SELECT COUNT(DISTINCT cluster_id) FROM face_clusters"
+        ).fetchone()[0])
         groups=c.execute("""
         SELECT cluster_id, COUNT(DISTINCT image_id)
         FROM face_clusters g JOIN face_embeddings e ON g.face_id=e.face_id
@@ -547,11 +615,14 @@ def groups_report(dbpath:Path, source:Path, limit:int=1000) -> dict:
                   JOIN face_clusters g ON e.face_id=g.face_id
                   WHERE g.cluster_id=? ORDER BY e.score DESC LIMIT 30""",
                   (cluster_id,)).fetchall()
-            out.append({"id":cluster_id,"photos":n,
+            out.append({"id":cluster_id,"revision":group_revision(c,cluster_id),
+                        "photos":n,
                         "name":names[0] if names else f"Человек {cluster_id}",
                         "verified_name":bool(names),
                         "photo_ids":list(dict.fromkeys(image for _,image in rows))[:18]})
         return {"ok":True,"groups":out,
+                "total_groups":total_groups,
+                "groups_truncated":len(out)<total_groups,
                 "indexed_faces":c.execute("SELECT count(*) FROM face_embeddings").fetchone()[0],
                 "scanned_images":c.execute("SELECT count(*) FROM face_scans WHERE status='DONE'").fetchone()[0],
                 "photos_modified":False,"cloud_upload":False}
@@ -629,7 +700,8 @@ def render_private_gallery(report:dict, live:bool=False) -> str:
     for group in report["groups"]:
         gid=int(group["id"])
         name=escape(group["name"])
-        html.append(f"<section data-group='{gid}'>")
+        revision=str(group.get("revision",""))
+        html.append(f"<section data-group='{gid}' data-revision='{revision}'>")
         cover=group.get("face_cover_data_uri")
         if cover and cover.startswith("data:image/jpeg;base64,"):
             html.append(f'<img class="portrait" alt="Лицо из группы {gid}" src="{cover}">')
@@ -637,10 +709,26 @@ def render_private_gallery(report:dict, live:bool=False) -> str:
         html.append(f'<p>{group["photos"]} фото с лицом</p>')
         if live:
             html.append(f'<button onclick="renameGroup({gid})">Назвать группу</button>')
-        html.append("<details><summary>Показать фотографии</summary>")
-        for image_id in group["photo_ids"]:
-            html.append(f'<img loading="lazy" alt="Фото {int(image_id)}" src="http://127.0.0.1:18780/api/thumb?id={int(image_id)}">')
-        html.append("</details></section>")
+        if live:
+            # Do not pre-render only the first 18: fetch any group's full
+            # gallery on demand, in bounded pages with lazy thumbnails.
+            html.append(
+                f'<details data-group-id="{gid}" data-revision="{revision}" ontoggle="onGroupToggle(this)">'
+                '<summary>Показать все фотографии</summary>'
+                '<div class="photos"></div>'
+                '<p class="page-status" aria-live="polite"></p>'
+                '<button type="button" class="load-more"'
+                ' onclick="loadNextGroupPage(this.closest(\'details\'))"'
+                ' hidden>Загрузить ещё</button></details>'
+            )
+        else:
+            html.append("<details><summary>Первые фотографии (оффлайн)</summary>")
+            for image_id in group["photo_ids"]:
+                html.append(f'<img loading="lazy" alt="Фото {int(image_id)}" src="http://127.0.0.1:18780/api/thumb?id={int(image_id)}">')
+            if group["photos"]>len(group["photo_ids"]):
+                html.append(f"<p>В этом сохранённом отчёте показаны только первые {len(group['photo_ids'])} из {group['photos']}. Для всех снимков открой интерактивный просмотр.</p>")
+            html.append("</details>")
+        html.append("</section>")
     html.append("</main>")
     if live:
         html.append("""<div><label>Поиск по группам
@@ -660,6 +748,55 @@ function filterPeople(){
  document.getElementById('filteredCount').textContent=count+' групп показано';
 }
 window.addEventListener('DOMContentLoaded',filterPeople);
+const photoPages = new Map();
+function onGroupToggle(details) {
+  if (details.open && !photoPages.has(details.dataset.groupId))
+    loadNextGroupPage(details);
+}
+async function loadNextGroupPage(details) {
+  if (!details || !details.open) return;
+  const key=details.dataset.groupId;
+  const status=details.querySelector('.page-status');
+  const more=details.querySelector('.load-more');
+  const previous=photoPages.get(key) || {offset:0, loading:false, finished:false};
+  if(previous.loading || previous.finished) return;
+  previous.loading=true;
+  photoPages.set(key,previous);
+  status.textContent='Загружаю фотографии…';
+  more.hidden=true;
+  try {
+    const prefix=location.pathname.endsWith('/') ?
+      location.pathname.slice(0,-1) : location.pathname;
+    const url=prefix+'/api/group?id='+encodeURIComponent(key)+
+      '&offset='+previous.offset+'&limit=48&revision='+
+      encodeURIComponent(details.dataset.revision);
+    const resp=await fetch(url,{mode:'same-origin',credentials:'omit',
+                                cache:'no-store'});
+    const result=await resp.json();
+    if(!resp.ok || !result.ok || result.group_id!==Number(key) ||
+       result.revision!==details.dataset.revision ||
+       result.offset!==previous.offset || !Array.isArray(result.photo_ids))
+      throw new Error('invalid gallery page');
+    const holder=details.querySelector('.photos');
+    for(const value of result.photo_ids) {
+      if(!Number.isSafeInteger(value) || value<1)continue;
+      const image=document.createElement('img');
+      image.loading='lazy';image.alt='Фото '+value;
+      image.src='http://127.0.0.1:18780/api/thumb?id='+value;
+      holder.appendChild(image);
+    }
+    previous.offset+=result.photo_ids.length;
+    previous.finished=!result.has_more;
+    status.textContent='Показано '+previous.offset+' из '+result.total+
+      ' фотографий';
+    more.hidden=previous.finished;
+  } catch (_) {
+    status.textContent='Группа могла измениться. Обнови страницу, если снимки не загружаются.';
+    more.hidden=false;
+  } finally {
+    previous.loading=false;
+  }
+}
 async function renameGroup(id){
  const current=document.getElementById('g'+id).textContent;
  const name=prompt('Имя человека (только по твоему подтверждению):',current);
@@ -669,7 +806,10 @@ async function renameGroup(id){
  try{
   const resp=await fetch(path+'/api/name',{method:'POST',mode:'same-origin',
    credentials:'omit',headers:{'Content-Type':'application/json',
-   'X-Face-Groups':'manual-user-gesture'},body:JSON.stringify({group_id:id,name:name.trim()})});
+   'X-Face-Groups':'manual-user-gesture'},body:JSON.stringify({
+     group_id:id,name:name.trim(),
+     revision:document.querySelector('[data-group="'+id+'"]')?.dataset.revision
+   })});
   const data=await resp.json();
   if(!resp.ok||!data.ok)throw Error('failed');
   document.getElementById('g'+id).textContent=data.name;

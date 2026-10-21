@@ -53,6 +53,32 @@ class FaceGroupTests(unittest.TestCase):
             self.assertFalse(m.battery_safe(require_charging=True)[0])
             self.assertTrue(m.battery_safe(require_charging=False)[0])
 
+    def test_unrestricted_battery_permits_ten_percent_without_charger(self):
+        from unittest.mock import patch
+        import subprocess,json
+        for level in (10,5,1):
+            data={"status":"DISCHARGING","percentage":level,"temperature":39.5}
+            output=subprocess.CompletedProcess(
+                ["termux-battery-status"],0,stdout=json.dumps(data))
+            with patch.object(m.subprocess,"run",return_value=output):
+                allowed,explanation=m.battery_safe(require_charging=False)
+                self.assertTrue(allowed,(level,explanation))
+        overheated={"status":"DISCHARGING","percentage":99,"temperature":42.1}
+        output=subprocess.CompletedProcess(
+            ["termux-battery-status"],0,stdout=json.dumps(overheated))
+        with patch.object(m.subprocess,"run",return_value=output):
+            self.assertFalse(m.battery_safe(require_charging=False)[0])
+
+    def test_job_scheduler_does_not_restrict_charging_or_battery(self):
+        source=Path(__file__).resolve().parents[1]
+        installer=(source/"scripts/install_face_schedule.sh").read_text()
+        scheduled=(source/"scripts/gallery_face_job.sh").read_text()
+        self.assertIn("--battery-not-low false --charging false",installer)
+        self.assertNotIn("--require-charging --batch-size",scheduled)
+        self.assertIn('"$script" --index --batch-size',scheduled)
+        self.assertIn('temp < 42',scheduled)
+        self.assertNotIn('level >= 30',scheduled)
+
     def test_charging_guard_blocks_before_models_and_db(self):
         from unittest.mock import patch
         with patch.object(m,'battery_safe',return_value=(False,'not charging')):
@@ -244,7 +270,7 @@ class FaceGroupTests(unittest.TestCase):
         self.assertEqual(p.stat().st_mode&0o777,0o600)
 
     def test_people_gallery_search_and_full_default_limit(self):
-        self.assertEqual(m.groups_report.__defaults__,(1000,))
+        self.assertEqual(m.groups_report.__defaults__,(50000,))
         report={"scanned_images":12,"indexed_faces":18,
                 "groups":[{"id":1,"name":"Человек 1","photos":4,
                            "photo_ids":[1,2,3,4]}]}
