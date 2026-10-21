@@ -295,6 +295,88 @@ def iter_pending(source:Path, dest:sqlite3.Connection, limit:int, root:Path):
             yield (image_id,relative,int(size),float(mtime),path)
 
 
+def reconcile_orphan_faces(gallery_db:Path,faces_db:Path, *,
+                           apply:bool=False, max_count:int=300,
+                           max_fraction:float=.10) -> dict:
+    """Synchronize metadata with authoritative local gallery, never media.
+
+    Fail closed on large gallery shrinkage or pinned manual person anchors.
+    Dry run opens both databases read-only, with no implicit DB creation.
+    """
+    if not 1<=max_count<=10000 or not 0<max_fraction<=1:
+        raise ValueError("invalid reconciliation safety limits")
+    with closing(sqlite_ro(gallery_db)) as gallery:
+        if gallery.execute("PRAGMA quick_check").fetchone()[0]!="ok":
+            raise ValueError("gallery DB failed integrity check")
+        current={int(r[0]) for r in gallery.execute(
+            "SELECT id FROM images WHERE path NOT LIKE 'shizuku://%'")}
+        if not faces_db.is_file():
+            return {"ok":True,"applied":False,"local_images":len(current),
+                    "orphan_scans":0,"orphan_face_vectors":0,
+                    "removed_scans":0,"removed_vectors":0,
+                    "regroup_required":False}
+        with closing(sqlite_ro(faces_db)) as existing:
+            if existing.execute("PRAGMA quick_check").fetchone()[0]!="ok":
+                raise ValueError("face DB failed integrity check")
+            old={int(r[0]) for r in existing.execute("SELECT image_id FROM face_scans")}
+            embedded={int(r[0]) for r in existing.execute(
+                "SELECT DISTINCT image_id FROM face_embeddings")}
+            # Some interrupted older versions can leave embeddings without
+            # a matching scan row. Reconcile those too, never create DB rows.
+            orphans=sorted((old | embedded)-current)
+            orphan_vectors=0
+            for image_id,n in existing.execute(
+                "SELECT image_id,count(*) FROM face_embeddings GROUP BY image_id"):
+                if int(image_id) not in current:
+                    orphan_vectors+=int(n)
+            pinned_orphans=[
+                int(r[0]) for r in existing.execute(
+                    "SELECT DISTINCT e.image_id FROM face_manual_names n "
+                    "JOIN face_embeddings e ON e.face_id=n.pinned_face_id")
+                if int(r[0]) not in current]
+        response={"ok":True,"applied":False,"local_images":len(current),
+                  "face_scans":len(old),"orphan_scans":len(old-current),
+                  "orphan_images_total":len(orphans),
+                  "orphan_face_vectors":orphan_vectors,
+                  "pinned_manual_faces_at_risk":len(pinned_orphans),
+                  "removed_scans":0,"removed_vectors":0,
+                  "regroup_required":bool(orphan_vectors)}
+        if not apply or not orphans and orphan_vectors==0:
+            return response
+        # Do not prune legitimate data when gallery suddenly appears empty,
+        # or when the deletion fraction spikes due to a broken index.
+        if (not current or len(orphans)>max_count
+            or (old and len(orphans)/len(old)>max_fraction)
+            or pinned_orphans):
+            response["ok"]=False
+            response["blocked"]="unsafe source shrinkage or manually pinned face"
+            return response
+        # Single transaction across all three private-face metadata tables;
+        # never mutate main gallery SQLite or source photos.
+        with closing(setup_private_db(faces_db)) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for offset in range(0,len(orphans),250):
+                    ids=orphans[offset:offset+250]
+                    placeholders=",".join("?" for _ in ids)
+                    db.execute(
+                        "DELETE FROM face_clusters WHERE face_id IN "
+                        "(SELECT face_id FROM face_embeddings WHERE image_id IN ("
+                        +placeholders+"))",ids)
+                    db.execute("DELETE FROM face_embeddings WHERE image_id IN ("
+                               +placeholders+")",ids)
+                    db.execute("DELETE FROM face_scans WHERE image_id IN ("
+                               +placeholders+")",ids)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+        response["applied"]=True
+        response["removed_scans"]=len(old-current)
+        response["removed_vectors"]=orphan_vectors
+        return response
+
+
 def nonimage_archive_header(path:Path) -> str | None:
     """Reject mislabeled archives before loading third-party image decoders."""
     try:
@@ -880,6 +962,10 @@ def write_private_gallery(report:dict, folder:Path) -> Path:
 
 def main() -> int:
     p=argparse.ArgumentParser()
+    p.add_argument("--reconcile",action="store_true",
+                   help="Safely find orphan face rows after photos leave the gallery")
+    p.add_argument("--apply",action="store_true",
+                   help="Apply --reconcile changes to private face DB only")
     p.add_argument("--index",action="store_true")
     p.add_argument("--group",action="store_true")
     p.add_argument("--report",action="store_true")
@@ -910,6 +996,12 @@ def main() -> int:
         p.error("--ignore-battery cannot be combined with --require-charging")
     if args.status:
         print(json.dumps(status_report(args.gallery_db,args.faces_db),ensure_ascii=False))
+    if args.reconcile:
+        result=reconcile_orphan_faces(args.gallery_db,args.faces_db,
+                                      apply=args.apply)
+        print(json.dumps(result,ensure_ascii=False))
+        if not result["ok"]:
+            return 2  # scheduled index/group MUST NOT continue after fail-closed refusal
     if args.index:
         print(json.dumps(do_batch(args.gallery_db,args.faces_db,args.models,
                                   args.shared_root,args.batch_size,
@@ -939,7 +1031,10 @@ def main() -> int:
         info=groups_report(args.faces_db,args.gallery_db)
         info=attach_face_covers(info,args.faces_db,args.gallery_db,args.shared_root)
         return serve(info,args.faces_db,args.port)
-    if not(args.index or args.group or args.report or args.name_group or args.serve or args.status):
+    if args.apply and not args.reconcile:
+        p.error("--apply requires --reconcile")
+    if not(args.index or args.group or args.report or args.name_group
+           or args.serve or args.status or args.reconcile):
         p.print_help()
     return 0
 
