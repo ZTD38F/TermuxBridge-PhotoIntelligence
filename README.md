@@ -318,3 +318,31 @@ unplug. Ordinary manual indexing (without --require-charging) retains the
 legacy battery guard. --ignore-battery and --require-charging are mutually
 exclusive; power checks cannot be bypassed accidentally for automatic jobs.
 No original image files or gallery SQLite data are modified by this guard.
+
+
+### Complete on-device face group browsing
+
+The people/face groups viewer now lists all grouped faces instead of the
+former silent limit of 1,000 groups. In live mode each group fetches its
+photos **only when opened**, through a loopback, random-token protected
+endpoint; it loads 48 thumbnails per page with an explicit "Load more"
+button. This fixes the old cap of 18 face photos per group, while keeping
+the mobile UI responsive and private. Maximum API page is 80; no embeddings
+or original image bytes are included in API JSON. On-demand thumbnails are
+served only from the existing local PhotoIntelligence server. A standalone
+static HTML report still shows a documented small subset per group and
+warns visibly if more photos are available. Cluster quality is approximate:
+this does not prove the names or personal identities of people depicted.
+
+### On-device automatic people gallery: unrestricted battery level
+
+The face grouping job can run whether the phone is charging or
+discharging, including at 10% charge and below, as explicitly requested
+by the phone owner. The existing 15-minute Android JobScheduler entry
+uses --charging false and --battery-not-low false. The scheduled worker
+does not request --require-charging. This setting does not remove the
+42°C temperature cutoff, data integrity protections, per-run CPU/time
+limits, storage-space requirements or the Android/Termux permission
+boundary. If the device is in Android Doze mode, JobScheduler may
+still delay an interval; the application does not claim exact-time
+continuous execution. Face groups are anonymous until manually named.

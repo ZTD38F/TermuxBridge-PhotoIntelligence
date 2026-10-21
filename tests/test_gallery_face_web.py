@@ -49,7 +49,8 @@ class FaceWebTests(unittest.TestCase):
         return code,b,h
 
     def send_name(self,name="Давид",group=1,origin=None,custom=True):
-        body=json.dumps({"group_id":group,"name":name}).encode()
+        body=json.dumps({"group_id":group,"name":name,
+                         "revision":self.http.group_revisions.get(group,"invalid")}).encode()
         headers={"Content-Type":"application/json",
                  "Origin":origin or "http://"+self.host}
         if custom:headers["X-Face-Groups"]="manual-user-gesture"
@@ -89,6 +90,105 @@ class FaceWebTests(unittest.TestCase):
         c=groups.sqlite_ro(self.db)
         self.assertEqual(c.execute("select count(*) from face_manual_names").fetchone()[0],0)
         c.close()
+
+    def test_group_page_endpoint_returns_all_photos_not_first_eighteen(self):
+        c=groups.setup_private_db(self.db)
+        vec=np.zeros(128,dtype=np.float32)
+        vec[0]=1
+        with c:
+            for idx in range(2,72):
+                c.execute("""INSERT INTO face_embeddings(
+                    face_id,image_id,face_ordinal,x,y,width,height,score,vector,algorithm)
+                    VALUES(?,?,0,2,3,66,66,?, ?,?)""",
+                    (idx,idx+10,.93,vec.tobytes(),groups.VERSION))
+                c.execute("INSERT INTO face_clusters VALUES(?,?,?)",
+                          (idx,1,groups.now()))
+        c.close()
+        first=groups.group_photo_page(self.db,1,0,48)
+        later=groups.group_photo_page(self.db,1,48,48)
+        self.assertEqual(first["total"],71)
+        self.assertEqual(len(first["photo_ids"]),48)
+        self.assertTrue(first["has_more"])
+        self.assertEqual(len(later["photo_ids"]),23)
+        self.assertFalse(later["has_more"])
+        self.assertEqual(len(set(first["photo_ids"]+later["photo_ids"])),71)
+        # Old browser snapshot must not show changed group membership.
+        code,_,_=self.fetch("GET",self.prefix+
+                        "/api/group?id=1&offset=48&limit=48&revision="+
+                        self.http.group_revisions[1])
+        self.assertEqual(code,422)
+        con=groups.sqlite_ro(self.db)
+        try:
+            latest=groups.group_revision(con,1)
+        finally:
+            con.close()
+        fresh_report=dict(self.report,groups=[dict(self.report["groups"][0],
+                         revision=latest)])
+        fresh,url=web.make_server(fresh_report,self.db)
+        t=threading.Thread(target=fresh.serve_forever,daemon=True);t.start()
+        try:
+            u=urlsplit(url)
+            connection=http.client.HTTPConnection(u.netloc,timeout=5)
+            query=u.path.rstrip("/")+"/api/group?id=1&offset=48&limit=48&revision="+fresh.group_revisions[1]
+            connection.request("GET",query)
+            response=connection.getresponse()
+            data=response.read();headers=dict(response.getheaders())
+            code=response.status;connection.close()
+            self.assertEqual(code,200)
+            obj=json.loads(data)
+            self.assertEqual(obj["total"],71)
+            self.assertEqual(len(obj["photo_ids"]),23)
+            self.assertEqual(headers["Referrer-Policy"],"no-referrer")
+        finally:
+            fresh.shutdown();fresh.server_close();t.join(timeout=2)
+
+    def test_group_photo_page_rejects_unknown_oversized_and_unauthorized(self):
+        self.assertEqual(self.fetch("GET","/api/group?id=1&offset=0&limit=48")[0],404)
+        self.assertEqual(self.fetch("GET",self.prefix+
+            "/api/group?id=9&offset=0&limit=48")[0],422)
+        self.assertEqual(self.fetch("GET",self.prefix+
+            "/api/group?id=1&offset=0&limit=50000")[0],422)
+        self.assertEqual(self.fetch("GET",self.prefix+
+            "/api/group?id=1&offset=-1&limit=48")[0],422)
+        self.assertEqual(self.fetch("GET",self.prefix+
+            "/api/group?id=1&offset=0&limit=48&unexpected=1")[0],422)
+        self.assertEqual(self.fetch("GET",self.prefix+
+            "/api/group?id=1&offset=0&limit=48&revision="+
+            self.http.group_revisions[1])[0],200)
+        with self.assertRaises(ValueError):
+            groups.group_photo_page(self.db,1,0,81)
+        with self.assertRaises(ValueError):
+            groups.group_photo_page(self.db,True,0,48)
+
+    def test_stale_group_name_update_blocked_after_regrouping(self):
+        self.assertEqual(self.send_name(name="Previous",group=1)[0],200)
+        c=groups.setup_private_db(self.db)
+        v=np.zeros(128,dtype=np.float32);v[0]=1
+        with c:
+            c.execute("""INSERT INTO face_embeddings(
+                face_id,image_id,face_ordinal,x,y,width,height,score,vector,algorithm)
+                VALUES(3,66,0,1,2,55,55,.93,?,?)""",
+                (v.tobytes(),groups.VERSION))
+            c.execute("INSERT INTO face_clusters VALUES(3,1,?)",(groups.now(),))
+        c.close()
+        self.assertEqual(self.send_name(name="Wrong",group=1)[0],422)
+        c=groups.sqlite_ro(self.db)
+        try:
+            self.assertEqual(c.execute(
+                "SELECT label FROM face_manual_names").fetchone()[0],"Previous")
+        finally:
+            c.close()
+
+    def test_browser_loads_group_only_when_expanded(self):
+        page=groups.render_private_gallery(self.report,live=True)
+        self.assertIn('onGroupToggle(this)',page)
+        self.assertIn("const photoPages = new Map()",page)
+        self.assertIn("loadNextGroupPage(details)",page)
+        self.assertIn("limit=48",page)
+        self.assertIn("Показано ",page)
+        self.assertNotIn('src="http://127.0.0.1:18780/api/thumb?id=11"',page)
+        offline=groups.render_private_gallery(self.report,live=False)
+        self.assertIn('src="http://127.0.0.1:18780/api/thumb?id=11"',offline)
 
     def test_portrait_cover_stays_local_and_no_original_changes(self):
         media=self.root/"shared"

@@ -5,16 +5,26 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
 from pathlib import Path
 import secrets
+from contextlib import closing
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit,parse_qs
 
-from gallery_face_groups import render_private_gallery, name_group
+from gallery_face_groups import (
+    render_private_gallery, name_group, group_photo_page, group_revision, sqlite_ro
+)
 
 
 def make_server(report:dict,faces_db:Path,port:int=0):
     token=secrets.token_urlsafe(30)
     prefix="/"+token
-    allowed_ids={int(g["id"]) for g in report["groups"]}
+    with closing(sqlite_ro(faces_db)) as db:
+        allowed_ids={int(g["id"]):str(g.get("revision") or group_revision(db,int(g["id"])))
+                     for g in report["groups"]}
+    # Legacy test fixtures may omit revision, but every production page
+    # gets its group revision before the HTML is rendered.
+    report=dict(report)
+    report["groups"]=[dict(g,revision=allowed_ids[int(g["id"])])
+                      for g in report["groups"]]
     page=render_private_gallery(report,live=True).encode("utf-8")
     last={"time":time.monotonic()}
     class Handler(BaseHTTPRequestHandler):
@@ -36,9 +46,30 @@ def make_server(report:dict,faces_db:Path,port:int=0):
             self.end_headers()
             self.wfile.write(blob)
         def do_GET(self):
-            if urlsplit(self.path).path==prefix+"/":
+            parsed=urlsplit(self.path)
+            if parsed.path==prefix+"/":
                 last["time"]=time.monotonic()
                 self.send(200,page,"text/html; charset=utf-8")
+            elif parsed.path==prefix+"/api/group":
+                try:
+                    query=parse_qs(parsed.query,strict_parsing=True,max_num_fields=4)
+                    if set(query)!={"id","offset","limit","revision"} or any(
+                        len(v)!=1 for v in query.values()
+                    ):
+                        raise ValueError("bad pagination")
+                    gid=int(query["id"][0])
+                    if gid not in allowed_ids or query["revision"][0]!=allowed_ids[gid]:
+                        raise ValueError("unknown or stale group")
+                    data=group_photo_page(faces_db,gid,
+                                          int(query["offset"][0]),
+                                          int(query["limit"][0]),
+                                          revision=allowed_ids[gid])
+                    last["time"]=time.monotonic()
+                    self.send(200,json.dumps(data,separators=(",",":")).encode("utf-8"),
+                              "application/json; charset=utf-8")
+                except (ValueError,TypeError,OverflowError):
+                    self.send(422,b'{"ok":false,"error":"invalid-page"}',
+                              "application/json")
             else:
                 self.send(404,b'{"ok":false}',"application/json")
         def do_POST(self):
@@ -57,12 +88,14 @@ def make_server(report:dict,faces_db:Path,port:int=0):
                     raise ValueError("request too large")
                 self.connection.settimeout(6)
                 obj=json.loads(self.rfile.read(length))
-                if not isinstance(obj,dict) or set(obj)!={"group_id","name"}:
+                if not isinstance(obj,dict) or set(obj)!={"group_id","name","revision"}:
                     raise ValueError("incorrect form")
                 gid=obj["group_id"]
-                if not isinstance(gid,int) or isinstance(gid,bool) or gid not in allowed_ids:
-                    raise ValueError("unknown group")
-                result=name_group(faces_db,gid,obj["name"])
+                if (not isinstance(gid,int) or isinstance(gid,bool)
+                    or gid not in allowed_ids or obj["revision"]!=allowed_ids[gid]):
+                    raise ValueError("unknown or stale group")
+                result=name_group(faces_db,gid,obj["name"],
+                                  expected_revision=allowed_ids[gid])
                 last["time"]=time.monotonic()
                 body=json.dumps(result,ensure_ascii=False).encode("utf-8")
                 self.send(200,body,"application/json; charset=utf-8")
@@ -70,6 +103,7 @@ def make_server(report:dict,faces_db:Path,port:int=0):
                 self.send(422,b'{"ok":false,"error":"invalid"}',"application/json")
     server=ThreadingHTTPServer(("127.0.0.1",port),Handler)
     server.daemon_threads=True
+    server.group_revisions=allowed_ids
     server.last_activity=last
     server.started_at=time.monotonic()
     url=f"http://127.0.0.1:{server.server_port}{prefix}/"
