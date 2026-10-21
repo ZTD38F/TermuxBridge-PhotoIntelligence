@@ -364,3 +364,22 @@ placed ABOVE the people grid, so browsing no longer requires scrolling to
 the bottom just to filter. The counter now distinguishes all groups from a
 truncated result. Singletons remain visible unless the user explicitly
 enables the filter.
+
+### Automatic stale face-index reconciliation (Android)
+
+The standalone face index is reconciled with the authoritative gallery
+SQLite before every scheduled face job.
+gallery-face-groups --reconcile previews cleanup and never writes.
+gallery-face-groups --reconcile --apply removes only orphaned face_scans,
+face_embeddings and face_clusters rows in private face-group SQLite.
+It never edits original photos or gallery SQLite. Missing manually
+named anchor faces block the operation. Unexpected source shrinkage
+(>10% of face scans, >300 deletions, or empty gallery) fails closed:
+the scheduled scan and grouping do not proceed on suspect data.
+Groups are rebuilt by the existing scheduled operation, not another
+background timer. No ADB, Shizuku, root or external intermediary.
+
+Interrupted index writes may also leave face vectors without scan
+rows; these are reconciled. Validate integrity and retained rollback
+snapshot before an initial live cleanup. Person names are never
+assigned automatically.

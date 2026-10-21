@@ -307,6 +307,117 @@ class FaceGroupTests(unittest.TestCase):
         self.assertEqual(x["remaining"],0)
         self.assertEqual(x["database_integrity"],"ok")
 
+    def _inject_orphan_fixture(self, n=1, named=False):
+        c=m.setup_private_db(self.dbpath)
+        import numpy as np
+        for idx in range(n):
+            source_id=1000+idx
+            c.execute("""INSERT INTO face_scans(image_id,path,size,mtime,
+                 algorithm,status,checked_at)
+                 VALUES(?,?,?,?,?,?,?)""",
+                 (source_id,f"DCIM/lost{idx}.jpg",100,12.0,m.VERSION,
+                  "DONE",m.now()))
+            c.execute("""INSERT INTO face_embeddings(image_id,face_ordinal,
+                 x,y,width,height,score,vector,algorithm)
+                 VALUES(?,?,?,?,?,?,?,?,?)""",
+                 (source_id,0,1.,2.,40.,40.,.99,
+                  np.ones(128,dtype=np.float32).tobytes(),m.VERSION))
+            fid=c.execute("SELECT face_id FROM face_embeddings WHERE image_id=?",
+                          (source_id,)).fetchone()[0]
+            c.execute("""INSERT INTO face_clusters(face_id,cluster_id,assigned_at)
+                 VALUES(?,?,?)""",(fid,idx+1,m.now()))
+            if named and idx==0:
+                c.execute("INSERT INTO face_manual_names VALUES (?,?,?)",
+                          (fid,"Test Person",m.now()))
+        info=(c.execute("SELECT count(*) FROM face_scans").fetchone()[0],
+              c.execute("SELECT count(*) FROM face_embeddings").fetchone()[0])
+        c.commit();c.close()
+        return info
+
+    def test_orphan_reconciliation_readonly_then_atomic_apply(self):
+        self._inject_orphan_fixture()
+        before=self.dbpath.read_bytes()
+        status=m.reconcile_orphan_faces(self.src,self.dbpath)
+        self.assertEqual(status["orphan_scans"],1)
+        self.assertEqual(status["orphan_face_vectors"],1)
+        self.assertFalse(status["applied"])
+        self.assertEqual(self.dbpath.read_bytes(),before)
+        result=m.reconcile_orphan_faces(self.src,self.dbpath,apply=True,
+                                       max_fraction=1.0)
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["removed_scans"],1)
+        self.assertEqual(result["removed_vectors"],1)
+        c=m.sqlite_ro(self.dbpath)
+        self.assertEqual(c.execute("SELECT count(*) FROM face_scans").fetchone()[0],0)
+        self.assertEqual(c.execute("SELECT count(*) FROM face_embeddings").fetchone()[0],0)
+        self.assertEqual(c.execute("SELECT count(*) FROM face_clusters").fetchone()[0],0)
+        c.close()
+        self.assertEqual(m.reconcile_orphan_faces(self.src,self.dbpath)["orphan_scans"],0)
+
+    def test_large_missing_gallery_fails_closed(self):
+        self._inject_orphan_fixture(n=2)
+        before=self.dbpath.read_bytes()
+        result=m.reconcile_orphan_faces(self.src,self.dbpath,apply=True)
+        self.assertFalse(result["ok"])
+        self.assertIn("unsafe",result["blocked"])
+        self.assertEqual(self.dbpath.read_bytes(),before)
+
+    def test_pinned_person_orphan_never_silently_deleted(self):
+        self._inject_orphan_fixture(named=True)
+        status=m.reconcile_orphan_faces(self.src,self.dbpath,apply=True,
+                                        max_fraction=1.0)
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["pinned_manual_faces_at_risk"],1)
+        c=m.sqlite_ro(self.dbpath)
+        self.assertEqual(c.execute("SELECT count(*) FROM face_manual_names").fetchone()[0],1)
+        self.assertEqual(c.execute("SELECT count(*) FROM face_embeddings").fetchone()[0],1)
+        c.close()
+
+    def test_virtual_android_data_never_counted_as_local_missing(self):
+        db=m.setup_private_db(self.dbpath)
+        db.execute("""INSERT INTO face_scans(image_id,path,size,mtime,
+              algorithm,status,checked_at) VALUES(?,?,?,?,?,?,?)""",
+               (2,"shizuku:///Android/data/a.jpg",5,123.,m.VERSION,"DONE",m.now()))
+        db.commit();db.close()
+        # Invalid virtual source was never a valid local face-index origin;
+        # it must be treated as stale, while real local image id=1 remains.
+        self.assertEqual(m.reconcile_orphan_faces(self.src,self.dbpath)["orphan_scans"],1)
+
+    def test_source_catalog_not_modified_by_face_cleanup(self):
+        self._inject_orphan_fixture()
+        source_bytes=self.src.read_bytes()
+        m.reconcile_orphan_faces(self.src,self.dbpath,apply=True,max_fraction=1)
+        self.assertEqual(self.src.read_bytes(),source_bytes)
+
+    def test_vector_without_scan_is_reconciled(self):
+        c=m.setup_private_db(self.dbpath)
+        c.execute("""INSERT INTO face_embeddings(image_id,face_ordinal,
+              x,y,width,height,score,vector,algorithm)
+              VALUES(?,?,?,?,?,?,?,?,?)""",
+              (777,0,1.,2.,40.,40.,.9,np.ones(128,dtype=np.float32).tobytes(),m.VERSION))
+        c.commit();c.close()
+        state=m.reconcile_orphan_faces(self.src,self.dbpath)
+        self.assertEqual(state["orphan_scans"],0)
+        self.assertEqual(state["orphan_images_total"],1)
+        self.assertEqual(state["orphan_face_vectors"],1)
+        applied=m.reconcile_orphan_faces(self.src,self.dbpath,apply=True,
+                                         max_fraction=1.0)
+        self.assertTrue(applied["applied"])
+        self.assertEqual(applied["removed_scans"],0)
+        self.assertEqual(applied["removed_vectors"],1)
+
+    def test_scheduler_reconcile_order_and_fail_closed(self):
+        script=(Path(__file__).resolve().parents[1]/"scripts/gallery_face_job.sh").read_text()
+        self.assertLess(script.index('"$script" --reconcile --apply'),
+                        script.index('"$script" --index --batch-size'))
+        engine=(Path(__file__).resolve().parents[1]/"scripts/gallery_face_groups.py").read_text()
+        self.assertIn("return 2  # scheduled index/group MUST NOT continue",engine)
+
+    def test_missing_face_database_returns_noop_not_created(self):
+        result=m.reconcile_orphan_faces(self.src,self.dbpath)
+        self.assertEqual(result["orphan_scans"],0)
+        self.assertFalse(self.dbpath.exists())
+
     def test_source_untouched_for_grouping_and_report(self):
         old=self.src.read_bytes()
         c=m.setup_private_db(self.dbpath);c.close()

@@ -34,6 +34,9 @@ if [[ -f "$log" && $(stat -c %s "$log") -ge 200000 ]];then
 fi
 {
  date -Is
+ # Remove only stale private face-index rows after authoritative catalog
+ # reconciliation. Fail closed on unexpected large image-source shrinkage.
+ /data/data/com.termux/files/usr/bin/python -B "$script" --reconcile --apply
  /data/data/com.termux/files/usr/bin/python -B "$script" --index --batch-size 240 --max-seconds 105
  /data/data/com.termux/files/usr/bin/python -B "$script" --group
 } >> "$log" 2>&1
